@@ -1,0 +1,227 @@
+module minBetaZero
+
+using Flux
+using POMDPs, POMDPModelTools, POMDPTools
+using ParticleFilters, MCTS
+using Statistics, Distributions, Random
+using Pkg
+using ProgressMeter, Plots
+
+# include("../lib/ParticleFilterTrees/src/ParticleFilterTrees.jl")
+using ParticleFilterTrees
+export PFTDPWTree, PFTDPWSolver, SparsePFTSolver, PFTDPWPlanner, PFTBelief 
+
+include("beliefmdp.jl")
+export ParticleBeliefMDP
+
+include("neural_network.jl")
+using .NeuralNet
+export NetworkParameters, ActorCritic, getloss
+
+include("pft_interface.jl")
+export NetworkWrapper, PUCT, get_value, get_policy, input_representation
+
+export betazero
+
+function setup()
+    Pkg.develop(PackageSpec(url=joinpath(@__DIR__,"..","lib","ParticleFilterTrees")))
+end
+
+
+
+function gen_data(pomdp, net; t_max=100, n_episodes=2)
+    nw = NetworkWrapper(; net)
+
+    solver = PFTDPWSolver(
+        value_estimator     = nw,
+        policy_estimator    = PUCT(; net=nw, c=1.0),
+        max_depth           = 10,
+        n_particles         = 100,
+        tree_queries        = 100,
+        max_time            = Inf,
+        k_a                 = 2.0,
+        alpha_a             = 0.25,
+        k_o                 = 2.0,
+        alpha_o             = 0.1,
+        check_repeat_obs    = false,
+        resample            = true,
+        treecache_size      = 10_000, 
+        beliefcache_size    = 10_000, 
+    )
+    planner = solve(solver, pomdp)
+
+    bmdp = ParticleBeliefMDP(pomdp)
+
+    b_vec = []
+    v_vec = Float32[]
+    p_vec = Vector{Float32}[]
+    ret_vec = Float32[]
+
+    @showprogress for _ in 1:n_episodes
+        episode_data = gen_episode(bmdp, nw, planner; t_max)
+        dst = (episode_data.b, episode_data.v, episode_data.p, episode_data.g)
+        src = (b_vec, v_vec, p_vec, ret_vec)
+        append!.(src, dst)
+    end
+
+    return (; 
+        value   = reshape(v_vec,1,:), 
+        belief  = stack(input_representation, b_vec), 
+        policy  = stack(p_vec),
+        returns = ret_vec
+    )
+end
+
+function gen_episode(bmdp, nw, planner; t_max=100)
+    b = rand(initialstate(bmdp))
+
+    # pomdp = bmdp.pomdp
+    # up = BootstrapFilter(bmdp.pomdp, 500)
+    # b = initialize_belief(up, initialstate(pomdp))
+    # s = rand(initialstate(pomdp))
+
+    b_vec = typeof(b)[]
+    p_vec = Vector{Float32}[]
+    r_vec = Float32[]
+    term_flag = false
+    for _ in 1:t_max
+        empty!(nw)
+        _, a_info = action_info(planner, b)
+        p = calculate_targetdist(bmdp.pomdp, a_info.tree)
+        a_idx = sample_cat(p) # bmdp uses action indexes
+
+        # a = bmdp.ordered_actions[a_idx]
+        # s,r,o = @gen(:sp, :r, :o)(pomdp, s, a)
+        # bp = update(up, b, a, o)
+
+        bp, r = @gen(:sp,:r)(bmdp, b, a_idx)
+        push!.((b_vec,p_vec,r_vec), (b,p,r))
+        b = bp
+        if ParticleFilterTrees.isterminalbelief(b)
+            term_flag = true
+            break
+        end
+    end
+
+    r_last = bootstrap_val = term_flag ? zero(eltype(r_vec)) : get_value(nw, b)
+    gamma = discount(bmdp)
+    for i in length(r_vec):-1:1
+        r_last = r_vec[i] += gamma * r_last
+    end
+
+    episode_return = r_vec[1] - bootstrap_val * gamma^t_max
+
+    return (; b=b_vec, v=r_vec, p=p_vec, g=episode_return)
+end
+
+function calculate_targetdist(pomdp, tree; zq=1, zn=1)
+    # P = Vector{Float32}(undef, length(actions(pomdp)))
+    P = zeros(Float32, length(actions(pomdp)))
+    qmax = -Inf
+    nsum = 0.0
+    for (_,aid) in tree.b_children[1]
+        qmax = max(qmax, tree.Qha[aid])
+        nsum += tree.Nha[aid]
+    end
+    for (a,aid) in tree.b_children[1]
+        n_norm = tree.Nha[aid] / nsum
+        q_norm = exp(tree.Qha[aid] - qmax)
+        P[actionindex(pomdp,a)] = n_norm^zn * q_norm^zq
+    end
+    @assert all(isfinite, P) "$P, $(tree.Qha[1]), $(tree.Nha[1])"
+    P ./= sum(P)
+    @assert all(0 .<= P .<= 1) "$P, $(tree.Qha[1]), $(tree.Nha[1])"
+    P
+end
+
+function train!(net, data; train_frac=0.8, batchsize=1024, lr = 1e-4, lambda = 0.01, n_epochs = 50)
+    split_data = Flux.splitobs(data, at=train_frac)
+    train_data = Flux.DataLoader(split_data[1]; batchsize=min(batchsize, Flux.numobs(split_data[1])), shuffle=true, partial=false)
+    valid_data = Flux.DataLoader(split_data[2]; batchsize=min(batchsize, Flux.numobs(split_data[2])), shuffle=true, partial=false)
+
+    opt = Flux.setup(Flux.Optimiser(Flux.Adam(lr), WeightDecay(lr*lambda)), net)
+
+    info = Dict(
+        :value_train_loss  => Float32[],
+        :value_valid_loss  => Float32[],
+        :policy_train_loss => Float32[],
+        :policy_valid_loss => Float32[],
+        :train_R           => Float32[],
+        :valid_R           => Float32[],
+        :train_KL          => Float32[],
+        :valid_KL          => Float32[]
+    )
+
+    Etrain = mean(-sum(x->iszero(x) ? x : x*log(x), train_data.data.policy_target; dims=1))
+    Evalid = mean(-sum(x->iszero(x) ? x : x*log(x), valid_data.data.policy_target; dims=1))
+    varVtrain = var(train_data.data.value_target)
+    varVvalid = var(valid_data.data.value_target)
+    
+    @showprogress for _ in 1:n_epochs
+        Flux.trainmode!(net)
+        for (; x, value_target, policy_target) in train_data    
+            grads = Flux.gradient(net) do net
+                losses = getloss(net, x; value_target, policy_target)
+                Flux.Zygote.ignore_derivatives() do 
+                    push!(info[:policy_train_loss], losses.policy_loss)
+                    push!(info[:train_KL], losses.policy_loss - Etrain)
+                    push!(info[:value_train_loss], losses.value_loss)
+                end
+                losses.value_loss + losses.policy_loss
+            end
+            Flux.update!(opt, net, grads[1])
+
+            push!(info[:train_R], Flux.mse(net(x).value, value_target)/varVtrain)
+        end
+
+        Flux.testmode!(net)
+        for (; x, value_target, policy_target) in valid_data    
+            losses = getloss(net, x; value_target, policy_target)
+            push!(info[:policy_valid_loss], losses.policy_loss)
+            push!(info[:valid_KL], losses.policy_loss - Evalid)
+            push!(info[:value_valid_loss], losses.value_loss)
+            push!(info[:valid_R], Flux.mse(net(x).value, value_target)/varVvalid)
+        end
+    end
+
+    for (k,v) in info
+        info[k] = dropdims(mean(reshape(v,:,n_epochs); dims=1); dims=1)
+    end
+
+    return info
+end
+
+function betazero(
+    pomdp::POMDP;
+    noise_alpha = 0.25,
+    noise_param = 0.1,
+    n_episodes = 500,
+    n_iter = 50,
+    t_max = 100,
+    nn_params::NetworkParameters
+    )
+    
+    net = ActorCritic(nn_params)
+
+    for itr in 1:n_iter
+        @info "Gathering Data - Iteration: $itr"
+        data = gen_data(pomdp, net; t_max, n_episodes)
+        @info "Mean return $(mean(data.returns)) +/- $(std(data.returns)/sqrt(length(data.returns)))"
+
+        noise = rand(Dirichlet(size(data.policy,1), Float32(noise_param)), size(data.policy,2))
+        alpha = Float32(noise_alpha)
+        noisy_policy = (1-alpha)*data.policy + alpha*noise
+
+        @info "Training"
+        train_info = train!(net, (; x=data.belief, value_target=data.value, policy_target=noisy_policy))
+
+        pv = plot(train_info[:train_R]; c=1, label="train", ylabel="FVU", title="Loss")
+        plot!(pv, train_info[:valid_R]; c=2, label="valid")
+        pp = plot(train_info[:train_KL]; c=1, label="train", ylabel="Policy KL")
+        plot!(pp, train_info[:valid_KL]; c=2, label="valid", xlabel="Epochs")
+        plot(pv, pp; layout=(2,1)) |> display
+    end
+end
+
+
+end # module minBetaZero

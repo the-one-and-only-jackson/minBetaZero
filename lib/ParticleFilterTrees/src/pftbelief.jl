@@ -1,0 +1,228 @@
+struct PFTBelief{T} <: AbstractParticleBelief{T}
+    particles::Vector{T}
+    weights::Vector{Float64}
+    non_terminal_ws::Float64
+end
+
+@inline ParticleFilters.n_particles(b::PFTBelief) = length(b.particles)
+@inline ParticleFilters.particles(p::PFTBelief) = p.particles
+ParticleFilters.weighted_particles(b::PFTBelief) = (
+    b.particles[i]=>b.weights[i] for i in 1:length(b.particles)
+)
+@inline ParticleFilters.weight_sum(b::PFTBelief) = 1.0 # gaurentee this elsewhere... greedy
+@inline ParticleFilters.weight(b::PFTBelief, i::Int) = b.weights[i]
+@inline ParticleFilters.particle(b::PFTBelief, i::Int) = b.particles[i]
+@inline ParticleFilters.weights(b::PFTBelief) = b.weights
+
+# function Random.rand(rng::AbstractRNG, b::PFTBelief)
+#     t = rand(rng) * weight_sum(b)
+#     i = 1
+#     cw = weight(b,1)
+#     N = n_particles(b)
+#     while cw < t && i < N
+#         i += 1
+#         @inbounds cw += weight(b,i)
+#     end
+#     return particle(b,i)
+# end
+function Random.rand(rng::AbstractRNG, sampler::Random.SamplerTrivial{<:PFTBelief})
+    b = sampler[]
+    t = rand(rng) * weight_sum(b)
+    i = 1
+    cw = weight(b,1)
+    N = n_particles(b)
+    while cw < t && i < N
+        i += 1
+        @inbounds cw += weight(b,i)
+    end
+    return particle(b,i)
+end
+
+
+
+function non_terminal_sample(rng::AbstractRNG, pomdp::POMDP, b::PFTBelief)
+    t = rand(rng) * b.non_terminal_ws
+    i = 1
+    N = n_particles(b)
+    cw = isterminal(pomdp,particle(b,1)) ? 0.0 : weight(b,1)
+    while cw < t && i < N
+        i += 1
+        isterminal(pomdp,particle(b,i)) && continue
+        @inbounds cw += weight(b,i)
+    end
+    return i
+end
+
+Random.rand(b::PFTBelief) = Random.rand(Random.GLOBAL_RNG, b)
+
+function resample!(rng::AbstractRNG, b::PFTBelief{T}, ps::Vector{T}) where T
+    n_p = n_particles(b)
+    @assert length(ps) >= n_p "length(ps) == $(length(ps)), np=$n_p"
+
+    ws = weight_sum(b)
+    U = rand(rng)*ws/n_p
+    @inbounds c = weight(b,1)
+    i = 1
+
+    for m in 1:n_p
+        while U > c && i < n_p
+            i += 1
+            @inbounds c += weight(b,i)
+        end
+        U += ws/n_p
+        @inbounds ps[m] = particle(b,i)
+    end
+
+    copyto!(particles(b), view(ps, 1:n_p))
+    fill!(weights(b), inv(n_p))
+    
+    return b
+end
+
+isterminalbelief(b::PFTBelief) = b.non_terminal_ws < eps()
+
+initialize_belief(rng, pomdp::POMDP{S}, b, n) where {S} = initialize_belief!(rng, Vector{S}(undef,n), Vector{Float64}(undef,n), pomdp, b)
+
+function initialize_belief!(rng::AbstractRNG, s::Vector{S}, w::Vector{Float64}, pomdp::POMDP{S}, b) where {S}
+    w_i = inv(length(s))
+    w = fill!(w,w_i) # all particles equal weight
+    terminal_count = 0
+
+    # if b isa AbstractParticleBelief
+    #     perm = randperm(n_particles(b))
+    #     perm_idx = 0
+    #     for s_idx in eachindex(s)
+    #         perm_idx += 1
+    #         p = particle(b, perm[perm_idx])
+    #         terminal_flag = isterminal(pomdp, p)
+    #         while terminal_flag && perm_idx < n_particles(b)
+    #             perm_idx += 1
+    #             p = particle(b, perm[perm_idx])
+    #             terminal_flag = isterminal(pomdp, p)
+    #         end
+    #         if !terminal_flag
+    #             s[s_idx] = p
+    #         elseif s_idx == 1
+    #             @warn "All states in input belief are terminal"
+    #             @views rand!(rng, s, b)
+    #             terminal_count = length(s)
+    #             break
+    #         else
+    #             @warn "Fewer non-terminal beliefs (N = $(s_idx-1)) than PFT particles (N = $(length(s)))"
+    #             @views rand!(rng, s[s_idx:end], s[1:s_idx-1])
+    #             break
+    #         end
+    #     end
+    # else
+    #     rand!(rng, s, b)
+    #     terminal_count = count(x->isterminal(pomdp,x), s)
+    # end
+
+    if b isa PFTBelief
+        for i in 1:length(s)
+            s[i] = particle(b, non_terminal_sample(rng,pomdp,b))
+        end
+        terminal_count = 0
+    else
+        rand!(rng, s, b)
+        terminal_count = count(x->isterminal(pomdp,x), s)
+    end
+    
+    non_terminal_ws = 1 - w_i * terminal_count
+    return PFTBelief(s, w, non_terminal_ws)
+end
+
+
+function GenBelief(
+    rng::AbstractRNG,
+    pomdp::POMDP{S,A,O},
+    b::PFTBelief{S},
+    a::A,
+    o::O,
+    p_idx::Int,
+    sample_sp::S,
+    sample_r::Float64,
+    resample::Bool
+    ) where {S,A,O}
+
+    N = n_particles(b)
+    bp_particles = Vector{S}(undef, N)
+    bp_weights = Vector{Float64}(undef, N)
+    resample_cache = Vector{S}(undef, N)
+
+    # obs::Bool = is_obs_required(pomdp)
+    # obs_req = Val(obs)
+    obs_req = Val(true)
+
+    GenBelief(
+        rng, bp_particles, bp_weights, resample_cache, obs_req,
+        pomdp, b, a, o, p_idx, sample_sp, sample_r, resample
+    )
+end
+
+function GenBelief(
+    rng::AbstractRNG,
+    bp_particles::Vector{S}, # empty vec
+    bp_weights::Vector{Float64}, # empty vec
+    resample_cache::Vector{S}, # empty vec
+    obs_req::Union{Val{true},Val{false}}, # = Val{is_obs_required(pomdp)}
+    pomdp::POMDP{S,A,O},
+    b::PFTBelief{S},
+    a::A,
+    o::O,
+    p_idx::Int,
+    sample_sp::S,
+    sample_r::Float64,
+    resample::Bool
+    ) where {S,A,O}
+
+    N = n_particles(b)
+    weighted_return = 0.0
+    non_terminal_ws = 0.0 # will be unnormalized
+    terminal_ws     = 0.0 # either 0 or sum of those particle's previous weight
+
+    for (i,(s,w)) in enumerate(weighted_particles(b))
+        # Propagation
+        if i === p_idx
+            (sp, r) = sample_sp, sample_r
+        elseif isterminal(pomdp, s)
+            (sp, r) = (s, 0.0)
+        else
+            (sp, r) = sr_gen(obs_req, rng, pomdp, s, a) # @gen(:sp,:r)(pomdp, s, a, rng)
+        end
+
+        weighted_return += r * w
+        bp_particles[i] = sp
+
+        if isterminal(pomdp, sp)
+            bp_weights[i] = resample ? 0.0 : w
+            terminal_ws += bp_weights[i]
+        else
+            bp_weights[i] = w * pdf(POMDPs.observation(pomdp, s, a, sp), o)    
+            non_terminal_ws += bp_weights[i]
+        end    
+    end
+
+    # normalize weights
+    if (non_terminal_ws + terminal_ws) < eps()
+        fill!(bp_weights, inv(N))
+    elseif non_terminal_ws > eps()
+        normalizing_factor = (1.0 - terminal_ws)/non_terminal_ws
+        for (i, p) in enumerate(particles(b))
+            isterminal(pomdp, p) && continue
+            bp_weights[i] *= normalizing_factor
+        end
+        non_terminal_ws = 1.0 - terminal_ws
+    end
+
+    if resample && non_terminal_ws > eps()
+        bp = PFTBelief(bp_particles, bp_weights, 1.0)
+        resample!(rng, bp, resample_cache)    
+    else
+        bp = PFTBelief(bp_particles, bp_weights, non_terminal_ws)
+    end
+
+    nt_prob = resample ? non_terminal_ws : 1.0 # only discount future returns when resampling
+
+    return bp::PFTBelief{S}, weighted_return::Float64, nt_prob::Float64
+end
