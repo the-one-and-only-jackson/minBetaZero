@@ -4,8 +4,6 @@ addprocs(10)
 
 @everywhere begin
     using minBetaZero
-    using ParticleFilters
-    using Statistics
     using Flux
     # include("models/LightDark.jl")
     using POMDPTools, QuickPOMDPs, POMDPs, Distributions

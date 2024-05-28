@@ -68,7 +68,7 @@ function (shared::SharedInput)(x)
     scaled_x = shared.scale(x)
     shared_out = shared.net(scaled_x)
     @assert all(isfinite, scaled_x)
-    @assert all(isfinite, shared_out)
+    @assert all(isfinite, shared_out) "$x"
     return shared_out
 end
 

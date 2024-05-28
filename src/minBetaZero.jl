@@ -47,6 +47,8 @@ end
     )
     t_max = 100
     n_episodes = 500
+    n_steps = 5000
+    use_episodes = true # gather data for at least n_episodes or at least n_steps
     c_puct = 100.0
     n_iter = 20
     noise_alpha = 0.25
@@ -60,9 +62,9 @@ end
 end
 
 function gen_data(pomdp, net, params::minBetaZeroParameters)
-    nw = NetworkWrapper(; net)
+    (; use_episodes, n_steps, n_episodes) = params
 
-    n_episodes = params.n_episodes
+    nw = NetworkWrapper(; net)
 
     planner = solve(
         PFTDPWSolver(;
@@ -73,12 +75,23 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
         pomdp
     )
 
-    @info "Number of processes: $(nworkers())"
-    progress = Progress(ceil(Int, n_episodes/nworkers()) * nworkers())
-    channel = RemoteChannel(()->Channel{Bool}(), 1)
+    progress = Progress(use_episodes ? n_episodes : n_steps)
+    channel = RemoteChannel(()->Channel{Int}(), 1)
 
-    @async while take!(channel)
-        next!(progress)
+    total_steps = 0
+    async_loop = @async while true
+        step = take!(channel)
+        if step == 0
+            finish!(progress)
+            break
+        elseif total_steps < progress.n # i dont know how to deal with progressmeter correctly
+            total_steps += step
+            if total_steps <= progress.n
+                next!(progress; step)
+            else
+                next!(progress; step=progress.n-(total_steps-step))
+            end
+        end
     end
 
     data = pmap(1:nworkers()) do i
@@ -87,13 +100,23 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
         p_vec = Vector{Float32}[]
         ret_vec = Float32[]
 
-        for _ in 1:ceil(Int, n_episodes/nworkers())
+        episodes = 0
+        steps = 0
+
+        while (use_episodes && episodes < n_episodes/nworkers()) || (!use_episodes && steps < n_steps/nworkers())
             episode_data = gen_episode(pomdp, nw, planner, params)
             dst = (episode_data.b, episode_data.v, episode_data.p, episode_data.g)
             src = (b_vec, v_vec, p_vec, ret_vec)
             append!.(src, dst)
 
-            put!(channel, true)
+            episodes += 1
+            steps += length(episode_data.v)
+
+            if use_episodes
+                put!(channel, 1)
+            else
+                put!(channel, length(episode_data.v))
+            end
         end
 
         return (; 
@@ -104,7 +127,8 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
         )
     end
 
-    put!(channel, false)
+    put!(channel, 0)
+    wait(async_loop)
 
     k = (:value, :belief, :policy, :returns)
     return NamedTuple{k}(reduce((args...)->cat(args...; dims=ndims(first(args))), (d[key] for d in data)) for key in k)
@@ -229,10 +253,33 @@ end
 function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
     (; n_iter, noise_alpha, noise_param, plot_training) = params
 
-    for itr in 1:n_iter
-        @info "Gathering Data - Iteration: $itr"
+    @info "Number of processes: $(nworkers())"
+
+    info = Dict(
+        :steps => Int[],
+        :episodes => Int[],
+        :returns => Float64[],
+        :returns_error => Float64[]
+    )
+
+    for itr in 1:n_iter+1
+        @info itr <= n_iter ? "Gathering Data - Iteration: $itr" : "Gathering Data - Final Evaluation"
         data = gen_data(pomdp, net, params)
-        @info "Mean return $(mean(data.returns)) +/- $(std(data.returns)/sqrt(length(data.returns)))"
+        
+        steps = length(data.value)
+        episodes = length(data.returns)
+        returns_mean = mean(data.returns)
+        returns_error = std(data.returns)/sqrt(length(data.returns))
+
+        push!.((info[:steps], info[:episodes], info[:returns], info[:returns_error]), (steps, episodes, returns_mean, returns_error))
+
+        _rm = round(returns_mean; sigdigits=1+Base.hidigit(returns_mean,10)-Base.hidigit(returns_error,10))
+        _re = round(returns_error; sigdigits=1)
+        @info "Mean return $_rm +/- $_re"
+        @info "Gathered $steps data points over $episodes episodes"
+
+        # This is so we get the stats after the n_iter network update
+        itr == n_iter+1 && break
 
         noise = rand(Dirichlet(size(data.policy,1), Float32(noise_param)), size(data.policy,2))
         alpha = Float32(noise_alpha)
@@ -251,6 +298,11 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
             plot(pv, pp; layout=(2,1)) |> display
         end
     end
+
+    info[:steps] = cumsum(info[:steps])
+    info[:episodes] = cumsum(info[:episodes])
+
+    return net, info
 end
 
 
