@@ -2,7 +2,7 @@ module minBetaZero
 
 using Distributed
 
-using Flux
+using Flux, CUDA
 using POMDPs, POMDPModelTools, POMDPTools
 using ParticleFilters, MCTS
 using Statistics, Distributions, Random
@@ -59,6 +59,7 @@ end
     lambda = 0.0
     n_epochs = 50
     plot_training = false
+    train_dev = cpu
 end
 
 function gen_data(pomdp, net, params::minBetaZeroParameters)
@@ -190,18 +191,21 @@ function calculate_targetdist(pomdp, tree; zq=1, zn=1)
 end
 
 function train!(net, data, params::minBetaZeroParameters)
-    (; train_frac, batchsize, lr, lambda, n_epochs) = params
+    (; train_frac, batchsize, lr, lambda, n_epochs, train_dev) = params
 
-    split_data = Flux.splitobs(data, at=train_frac)
+    split_data = Flux.splitobs(data, at=train_frac) 
+
+    Etrain = mean(-sum(x->iszero(x) ? x : x*log(x), split_data[1].policy_target; dims=1))
+    Evalid = mean(-sum(x->iszero(x) ? x : x*log(x), split_data[2].policy_target; dims=1))
+    varVtrain = var(split_data[1].value_target)
+    varVvalid = var(split_data[2].value_target)
+
+    split_data = split_data |> train_dev
     train_data = Flux.DataLoader(split_data[1]; batchsize=min(batchsize, Flux.numobs(split_data[1])), shuffle=true, partial=false)
     valid_data = Flux.DataLoader(split_data[2]; batchsize=min(4*batchsize, Flux.numobs(split_data[2])), shuffle=true, partial=false)
 
+    net = train_dev(net)
     opt = Flux.setup(Flux.Optimiser(Flux.Adam(lr), WeightDecay(lr*lambda)), net)
-
-    Etrain = mean(-sum(x->iszero(x) ? x : x*log(x), train_data.data.policy_target; dims=1))
-    Evalid = mean(-sum(x->iszero(x) ? x : x*log(x), valid_data.data.policy_target; dims=1))
-    varVtrain = var(train_data.data.value_target)
-    varVvalid = var(valid_data.data.value_target)
 
     train_info = Dict(:policy_loss=>Float32[], :policy_KL=>Float32[], :value_loss=>Float32[], :value_FVU=>Float32[])
     valid_info = Dict(:policy_loss=>Float32[], :policy_KL=>Float32[], :value_loss=>Float32[], :value_FVU=>Float32[])
@@ -247,7 +251,7 @@ function train!(net, data, params::minBetaZeroParameters)
         info[k] = dropdims(mean(reshape(v,:,n_epochs); dims=1); dims=1)
     end
 
-    return net, info
+    return cpu(net), info
 end
 
 function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)

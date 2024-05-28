@@ -5,7 +5,7 @@ addprocs(10)
 
 @everywhere begin
     using minBetaZero
-    using Flux
+    using Flux, CUDA
     using ParticleFilters
     using Statistics
     include("models/LightDark.jl")
@@ -61,7 +61,8 @@ params = minBetaZeroParameters(
     lr = 1e-3,
     lambda = 0.0,
     n_epochs = 50,
-    plot_training = true
+    plot_training = true,
+    train_dev = gpu
 )
 
 nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
@@ -75,7 +76,7 @@ nn_params = NetworkParameters( # These are POMDP specific! not general parameter
     shared_out_size = 64 # must manually set... fix at a later date...        
 )
 
-net, info = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params))
+@time net, info = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params));
 
 
 plot(
