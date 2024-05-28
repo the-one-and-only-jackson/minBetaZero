@@ -1,5 +1,7 @@
 module minBetaZero
 
+using Distributed
+
 using Flux
 using POMDPs, POMDPModelTools, POMDPTools
 using ParticleFilters, MCTS
@@ -52,24 +54,41 @@ function gen_data(pomdp, net; t_max=100, n_episodes=2)
 
     bmdp = ParticleBeliefMDP(pomdp)
 
-    b_vec = []
-    v_vec = Float32[]
-    p_vec = Vector{Float32}[]
-    ret_vec = Float32[]
+    @info "Number of processes: $(nworkers())"
+    progress = Progress(ceil(Int, n_episodes/nworkers()) * nworkers())
+    channel = RemoteChannel(()->Channel{Bool}(), 1)
 
-    @showprogress for _ in 1:n_episodes
-        episode_data = gen_episode(bmdp, nw, planner; t_max)
-        dst = (episode_data.b, episode_data.v, episode_data.p, episode_data.g)
-        src = (b_vec, v_vec, p_vec, ret_vec)
-        append!.(src, dst)
+    @async while take!(channel)
+        next!(progress)
     end
 
-    return (; 
-        value   = reshape(v_vec,1,:), 
-        belief  = stack(input_representation, b_vec), 
-        policy  = stack(p_vec),
-        returns = ret_vec
-    )
+    data = pmap(1:nworkers()) do i
+        b_vec = []
+        v_vec = Float32[]
+        p_vec = Vector{Float32}[]
+        ret_vec = Float32[]
+
+        for _ in 1:ceil(Int, n_episodes/nworkers())
+            episode_data = gen_episode(bmdp, nw, planner; t_max)
+            dst = (episode_data.b, episode_data.v, episode_data.p, episode_data.g)
+            src = (b_vec, v_vec, p_vec, ret_vec)
+            append!.(src, dst)
+            
+            put!(channel, true)
+        end
+
+        return (; 
+            value   = reshape(v_vec,1,:), 
+            belief  = stack(input_representation, b_vec), 
+            policy  = stack(p_vec),
+            returns = ret_vec
+        )
+    end
+
+    put!(channel, false)
+
+    k = (:value, :belief, :policy, :returns)
+    return NamedTuple{k}(reduce((args...)->cat(args...; dims=ndims(first(args))), (d[key] for d in data)) for key in k)
 end
 
 function gen_episode(bmdp, nw, planner; t_max=100)

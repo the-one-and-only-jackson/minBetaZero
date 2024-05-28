@@ -1,15 +1,22 @@
-using minBetaZero
+using Distributed
 
-using ParticleFilters
-using Statistics
-using Flux
+addprocs(10)
 
-include("models/LightDark.jl")
-using .LightDark
+@everywhere begin
+    using minBetaZero
+    using ParticleFilters
+    using Statistics
+    using Flux
+    include("models/LightDark.jl")
+end
+
+@everywhere begin
+    using .LightDark
+end
 
 # minBetaZero.setup()
 
-function minBetaZero.input_representation(b::AbstractParticleBelief{<:LightDarkState})
+@everywhere function minBetaZero.input_representation(b::AbstractParticleBelief{<:LightDarkState})
     out_arr = Array{Float32}(undef, (1, n_particles(b)))
     for (j, p) in enumerate(particles(b))
         out_arr[1,j] = p.y
@@ -31,5 +38,3 @@ nn_params = NetworkParameters(
 )
 
 betazero(LightDarkPOMDP(); nn_params, n_episodes=500, t_max=100, noise_alpha=0.1)
-
-
