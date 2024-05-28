@@ -36,7 +36,7 @@ function gen_data(pomdp, net; t_max=100, n_episodes=2)
 
     solver = PFTDPWSolver(
         value_estimator     = nw,
-        # policy_estimator    = PUCT(; net=nw, c=1.0),
+        policy_estimator    = PUCT(; net=nw, c=100.0),
         max_depth           = 10,
         n_particles         = 100,
         tree_queries        = 100,
@@ -48,8 +48,8 @@ function gen_data(pomdp, net; t_max=100, n_episodes=2)
         alpha_o             = 0.,
         check_repeat_obs    = true,
         resample            = true,
-        treecache_size      = 10_000, 
-        beliefcache_size    = 10_000,
+        treecache_size      = 1_000, 
+        beliefcache_size    = 1_000,
         criterion           = ParticleFilterTrees.MaxPoly(95., 0.39) 
     )
     planner = solve(solver, pomdp)
@@ -158,58 +158,60 @@ end
 function train!(net, data; train_frac=0.8, batchsize=128, lr = 3e-4, lambda = 0.0, n_epochs = 50)
     split_data = Flux.splitobs(data, at=train_frac)
     train_data = Flux.DataLoader(split_data[1]; batchsize=min(batchsize, Flux.numobs(split_data[1])), shuffle=true, partial=false)
-    valid_data = Flux.DataLoader(split_data[2]; batchsize=min(batchsize, Flux.numobs(split_data[2])), shuffle=true, partial=false)
+    valid_data = Flux.DataLoader(split_data[2]; batchsize=min(4*batchsize, Flux.numobs(split_data[2])), shuffle=true, partial=false)
 
     opt = Flux.setup(Flux.Optimiser(Flux.Adam(lr), WeightDecay(lr*lambda)), net)
-
-    info = Dict(
-        :value_train_loss  => Float32[],
-        :value_valid_loss  => Float32[],
-        :policy_train_loss => Float32[],
-        :policy_valid_loss => Float32[],
-        :train_R           => Float32[],
-        :valid_R           => Float32[],
-        :train_KL          => Float32[],
-        :valid_KL          => Float32[]
-    )
 
     Etrain = mean(-sum(x->iszero(x) ? x : x*log(x), train_data.data.policy_target; dims=1))
     Evalid = mean(-sum(x->iszero(x) ? x : x*log(x), valid_data.data.policy_target; dims=1))
     varVtrain = var(train_data.data.value_target)
     varVvalid = var(valid_data.data.value_target)
+
+    train_info = Dict(:policy_loss=>Float32[], :policy_KL=>Float32[], :value_loss=>Float32[], :value_FVU=>Float32[])
+    valid_info = Dict(:policy_loss=>Float32[], :policy_KL=>Float32[], :value_loss=>Float32[], :value_FVU=>Float32[])
+
+    function lossfun(net, x; value_target, policy_target, info, policy_entropy, value_var)
+        losses = getloss(net, x; value_target, policy_target)
+        Flux.Zygote.ignore_derivatives() do 
+            push!(info[:policy_loss], losses.policy_loss                 )
+            push!(info[:policy_KL]  , losses.policy_loss - policy_entropy)
+            push!(info[:value_loss] , losses.value_loss                  )
+            push!(info[:value_FVU]  , losses.value_mse / value_var       )
+        end
+        losses.value_loss + losses.policy_loss
+    end
     
     @showprogress for _ in 1:n_epochs
         Flux.trainmode!(net)
         for (; x, value_target, policy_target) in train_data    
             grads = Flux.gradient(net) do net
-                losses = getloss(net, x; value_target, policy_target)
-                Flux.Zygote.ignore_derivatives() do 
-                    push!(info[:policy_train_loss], losses.policy_loss)
-                    push!(info[:train_KL], losses.policy_loss - Etrain)
-                    push!(info[:value_train_loss], losses.value_loss)
-                end
-                losses.value_loss + losses.policy_loss
+                lossfun(net, x; value_target, policy_target, info=train_info, policy_entropy=Etrain, value_var=varVtrain)
             end
             Flux.update!(opt, net, grads[1])
-
-            push!(info[:train_R], Flux.mse(net(x).value, value_target)/varVtrain)
         end
 
         Flux.testmode!(net)
         for (; x, value_target, policy_target) in valid_data    
-            losses = getloss(net, x; value_target, policy_target)
-            push!(info[:policy_valid_loss], losses.policy_loss)
-            push!(info[:valid_KL], losses.policy_loss - Evalid)
-            push!(info[:value_valid_loss], losses.value_loss)
-            push!(info[:valid_R], Flux.mse(net(x).value, value_target)/varVvalid)
+            lossfun(net, x; value_target, policy_target, info=valid_info, policy_entropy=Evalid, value_var=varVvalid)
         end
     end
+
+    info = Dict(
+        :value_train_loss  => train_info[:value_loss],
+        :value_valid_loss  => valid_info[:value_loss],
+        :policy_train_loss => train_info[:policy_loss],
+        :policy_valid_loss => valid_info[:policy_loss],
+        :train_R           => train_info[:value_FVU],
+        :valid_R           => valid_info[:value_FVU],
+        :train_KL          => train_info[:policy_KL],
+        :valid_KL          => valid_info[:policy_KL]
+    )
 
     for (k,v) in info
         info[k] = dropdims(mean(reshape(v,:,n_epochs); dims=1); dims=1)
     end
 
-    return info
+    return net, info
 end
 
 function betazero(
@@ -234,7 +236,7 @@ function betazero(
         noisy_policy = (1-alpha)*data.policy + alpha*noise
 
         @info "Training"
-        train_info = train!(net, (; x=data.belief, value_target=data.value, policy_target=noisy_policy))
+        net, train_info = train!(net, (; x=data.belief, value_target=data.value, policy_target=noisy_policy))
 
         pv = plot(train_info[:train_R]; c=1, label="train", ylabel="FVU", title="Loss")
         plot!(pv, train_info[:valid_R]; c=2, label="valid")

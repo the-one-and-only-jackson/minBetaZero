@@ -46,9 +46,9 @@ end
 
 function getloss(ac::ActorCritic, input; value_target, policy_target)
     encoded_input = ac.shared(input)
-    value_loss = getloss(ac.critic, encoded_input; value_target)
+    value_loss, value_mse = getloss(ac.critic, encoded_input; value_target)
     policy_loss = getloss(ac.actor, encoded_input; policy_target)
-    return (; value_loss, policy_loss)
+    return (; value_loss, value_mse, policy_loss)
 end
 
 """
@@ -168,15 +168,24 @@ end
 
 function getloss(critic::Critic, input; value_target)
     net_out = critic.net(input)
-    target = Flux.Zygote.ignore_derivatives() do
-        target_scale = critic.loss_transform(value_target)
-        if size(net_out,1) == 1
-            target = target_scale
-        else
-            target = twohot(value_target, critic.categories)
-        end
+    target_scalar = Flux.Zygote.@ignore_derivatives critic.loss_transform(value_target)
+    if size(net_out,1) == 1
+        target = target_scalar
+    else
+        target = Flux.Zygote.@ignore_derivatives twohot(value_target, critic.categories)
     end
-    critic.loss(net_out, target)
+    loss = critic.loss(net_out, target)
+
+    # make sure to get MSE to calculate fraction variance unexplained
+    mse = Flux.Zygote.ignore_derivatives() do 
+        critic.loss == Flux.Losses.mse && return loss
+
+        nominal_value = size(net_out, 1) == 1 ? net_out : critic.categories' * softmax(net_out; dims=1)
+        val_est = nominal_value |> critic.output_transform    
+        Flux.Losses.mse(val_est, target_scalar)
+    end
+
+    return loss, mse
 end
 
 """

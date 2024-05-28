@@ -32,12 +32,10 @@ end
 function select_action(criteria::BasicActionSelector, tree::PFTDPWTree, b_idx)
     (;k_a, alpha_a, enable_action_pw, rng, pomdp, criterion) = criteria
 
-    if enable_action_pw
-        if length(tree.b_children[b_idx]) ≤ k_a*tree.Nh[b_idx]^alpha_a
-            a = rand(rng, pomdp)
-            insert_action!(tree, b_idx, a)
-        end
-    else
+    if enable_action_pw && length(tree.b_children[b_idx]) ≤ k_a*tree.Nh[b_idx]^alpha_a
+        a = rand(rng, pomdp)
+        insert_action!(tree, b_idx, a)
+    elseif !enable_action_pw && isempty(tree.b_children[b_idx])
         for a in actions(pomdp)
             insert_action!(tree, b_idx, a)
         end

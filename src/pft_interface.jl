@@ -56,23 +56,28 @@ struct PUCT{N<:NetworkWrapper,P,A}
     k::Float64
     alpha::Float64
     c::Float64
+    enable_action_pw::Bool
 end
 function PUCT(; net, c=1.0)
     function(sol::PFTDPWSolver, pomdp::POMDP)
         A = actions(pomdp)
         Ai = map(a->actionindex(pomdp, a), A)
         ordered_actions = A[sortperm(Ai)]
-        PUCT(net, pomdp, ordered_actions, sol.k_a, sol.alpha_a, Float64(c))
+        PUCT(net, pomdp, ordered_actions, sol.k_a, sol.alpha_a, Float64(c), sol.enable_action_pw)
     end
 end
 function ParticleFilterTrees.select_action(criteria::PUCT, tree::PFTDPWTree{S,A}, b_idx) where {S,A}
-    (; net, pomdp, ordered_actions, k, alpha, c) = criteria
+    (; net, pomdp, ordered_actions, k, alpha, c, enable_action_pw) = criteria
 
     P = get_policy(net, tree.b[b_idx])
 
-    if length(tree.b_children[b_idx]) ≤ k*tree.Nh[b_idx]^alpha
+    if enable_action_pw && length(tree.b_children[b_idx]) ≤ k*tree.Nh[b_idx]^alpha
         a = ordered_actions[sample_cat(P)]
         ParticleFilterTrees.insert_action!(tree, b_idx, a)
+    elseif !enable_action_pw && isempty(tree.b_children[b_idx])
+        for a in actions(pomdp)
+            ParticleFilterTrees.insert_action!(tree, b_idx, a)
+        end
     end
 
     max_crit = -Inf
