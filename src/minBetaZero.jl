@@ -36,19 +36,21 @@ function gen_data(pomdp, net; t_max=100, n_episodes=2)
 
     solver = PFTDPWSolver(
         value_estimator     = nw,
-        policy_estimator    = PUCT(; net=nw, c=1.0),
+        # policy_estimator    = PUCT(; net=nw, c=1.0),
         max_depth           = 10,
         n_particles         = 100,
         tree_queries        = 100,
         max_time            = Inf,
-        k_a                 = 2.0,
-        alpha_a             = 0.25,
-        k_o                 = 2.0,
-        alpha_o             = 0.1,
-        check_repeat_obs    = false,
+        k_a                 = 5.,
+        alpha_a             = 0.,
+        enable_action_pw    = false,
+        k_o                 = 24.,
+        alpha_o             = 0.,
+        check_repeat_obs    = true,
         resample            = true,
         treecache_size      = 10_000, 
-        beliefcache_size    = 10_000, 
+        beliefcache_size    = 10_000,
+        criterion           = ParticleFilterTrees.MaxPoly(95., 0.39) 
     )
     planner = solve(solver, pomdp)
 
@@ -73,7 +75,7 @@ function gen_data(pomdp, net; t_max=100, n_episodes=2)
             dst = (episode_data.b, episode_data.v, episode_data.p, episode_data.g)
             src = (b_vec, v_vec, p_vec, ret_vec)
             append!.(src, dst)
-            
+
             put!(channel, true)
         end
 
@@ -153,7 +155,7 @@ function calculate_targetdist(pomdp, tree; zq=1, zn=1)
     P
 end
 
-function train!(net, data; train_frac=0.8, batchsize=1024, lr = 1e-4, lambda = 0.01, n_epochs = 50)
+function train!(net, data; train_frac=0.8, batchsize=128, lr = 3e-4, lambda = 0.0, n_epochs = 50)
     split_data = Flux.splitobs(data, at=train_frac)
     train_data = Flux.DataLoader(split_data[1]; batchsize=min(batchsize, Flux.numobs(split_data[1])), shuffle=true, partial=false)
     valid_data = Flux.DataLoader(split_data[2]; batchsize=min(batchsize, Flux.numobs(split_data[2])), shuffle=true, partial=false)

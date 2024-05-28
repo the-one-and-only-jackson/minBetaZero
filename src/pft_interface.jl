@@ -37,7 +37,9 @@ end
 get_value(heuristic::NetworkWrapper, b) = heuristic.value[insert_belief!(heuristic, b)]
 get_policy(heuristic::NetworkWrapper, b; logits=false) = heuristic.policy[insert_belief!(heuristic, b; logits)]
 
-MCTS.estimate_value(heuristic::NetworkWrapper, pomdp, b, depth) = get_value(heuristic, b)
+function MCTS.estimate_value(heuristic::NetworkWrapper, pomdp::POMDP{S}, b::PFTBelief{S}, depth::Int) where {S}
+    get_value(heuristic, b)
+end
 
 function Base.empty!(heuristic::NetworkWrapper)
     empty!(heuristic.input)
@@ -124,3 +126,38 @@ function ParticleFilterTrees.select_action(criteria::Gumbel, tree::PFTDPWTree{S,
     return opt_a => opt_idx
 end
 =#
+
+function completed_policy(tree::PFTDPWTree{S,A}, b_idx, V, logits, pomdp) where {S,A}
+    # completed_Q = N(a) > 0 ? Q(a) : V(a)
+    completed_Q = copy(V)
+    for (a, a_idx) in tree.b_children[b_idx]
+        completed_Q[actionindex(pomdp, a)] = tree.Qha[a_idx]
+    end
+
+    sigma_Q = sigma(Q)
+
+    new_policy = softmax(logits + sigma_Q)
+end
+
+function nonroot_action_selction()
+    new_policy = completed_policy()
+    N = tree.Nh[b_idx]
+
+    objective = copy(new_policy)
+
+    for (a, _) in tree.b_children[b_idx]
+        Na = tree.Nha[a_idx]
+        pomdp_a_idx = actionindex(pomdp, a)
+        objective[pomdp_a_idx] -= Na / N
+    end
+
+    opt_pomdp_a_idx = argmax(objetive)
+    
+    opt_a = ordered_actions[opt_pomdp_a_idx]
+    opt_ba_idx = get_ba_idx!(b_idx, opt_a)
+
+    return opt_a => opt_ba_idx
+end
+
+
+

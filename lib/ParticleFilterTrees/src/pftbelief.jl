@@ -14,17 +14,6 @@ ParticleFilters.weighted_particles(b::PFTBelief) = (
 @inline ParticleFilters.particle(b::PFTBelief, i::Int) = b.particles[i]
 @inline ParticleFilters.weights(b::PFTBelief) = b.weights
 
-# function Random.rand(rng::AbstractRNG, b::PFTBelief)
-#     t = rand(rng) * weight_sum(b)
-#     i = 1
-#     cw = weight(b,1)
-#     N = n_particles(b)
-#     while cw < t && i < N
-#         i += 1
-#         @inbounds cw += weight(b,i)
-#     end
-#     return particle(b,i)
-# end
 function Random.rand(rng::AbstractRNG, sampler::Random.SamplerTrivial{<:PFTBelief})
     b = sampler[]
     t = rand(rng) * weight_sum(b)
@@ -37,7 +26,6 @@ function Random.rand(rng::AbstractRNG, sampler::Random.SamplerTrivial{<:PFTBelie
     end
     return particle(b,i)
 end
-
 
 
 function non_terminal_sample(rng::AbstractRNG, pomdp::POMDP, b::PFTBelief)
@@ -150,12 +138,8 @@ function GenBelief(
     bp_weights = Vector{Float64}(undef, N)
     resample_cache = Vector{S}(undef, N)
 
-    # obs::Bool = is_obs_required(pomdp)
-    # obs_req = Val(obs)
-    obs_req = Val(true)
-
     GenBelief(
-        rng, bp_particles, bp_weights, resample_cache, obs_req,
+        rng, bp_particles, bp_weights, resample_cache,
         pomdp, b, a, o, p_idx, sample_sp, sample_r, resample
     )
 end
@@ -165,7 +149,6 @@ function GenBelief(
     bp_particles::Vector{S}, # empty vec
     bp_weights::Vector{Float64}, # empty vec
     resample_cache::Vector{S}, # empty vec
-    obs_req::Union{Val{true},Val{false}}, # = Val{is_obs_required(pomdp)}
     pomdp::POMDP{S,A,O},
     b::PFTBelief{S},
     a::A,
@@ -188,7 +171,7 @@ function GenBelief(
         elseif isterminal(pomdp, s)
             (sp, r) = (s, 0.0)
         else
-            (sp, r) = sr_gen(obs_req, rng, pomdp, s, a) # @gen(:sp,:r)(pomdp, s, a, rng)
+            (sp, r) = sr_gen(rng, pomdp, s, a) # @gen(:sp,:r)(pomdp, s, a, rng)
         end
 
         weighted_return += r * w
@@ -225,4 +208,11 @@ function GenBelief(
     nt_prob = resample ? non_terminal_ws : 1.0 # only discount future returns when resampling
 
     return bp::PFTBelief{S}, weighted_return::Float64, nt_prob::Float64
+end
+
+function sr_gen(rng::AbstractRNG, pomdp::P, s::S, a::A) where {S,A,P<:POMDP{S,A}}
+    !hasmethod(reward, Tuple{P,S,A}) && return @gen(:sp,:r)(pomdp, s, a, rng)
+    sp = rand(rng, transition(pomdp, s, a))
+    r = reward(pomdp, s, a, sp)
+    return sp, r
 end

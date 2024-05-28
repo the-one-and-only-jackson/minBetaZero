@@ -80,13 +80,13 @@ function insert_root!(tree::PFTDPWTree{S,A}, b::PFTBelief{S}) where {S,A}
 end
 
 function insert_action!(tree::PFTDPWTree{S,A}, b_idx::Int, a::A; N_init=0, Q_init=0.0) where {S,A}
-    if !any(x[1] == a for x in tree.b_children[b_idx])
-        insert_action_unsafe!(tree, b_idx, a, N_init, Q_init)
+    for (_a, ba_idx) in tree.b_children[b_idx]
+        _a == a && return ba_idx
     end
-    nothing
+    insert_action_unsafe!(tree, b_idx, a, N_init, Q_init)
 end
 
-function insert_action_unsafe!(tree::PFTDPWTree{S,A}, b_idx::Int, a::A, N_init, Q_init) where {S,A}
+function insert_action_unsafe!(tree::PFTDPWTree{S,A}, b_idx::Int, a::A, N_init::Int, Q_init) where {S,A}
     ba_idx = length(tree.ba_children)+1
     push!(tree.b_children[b_idx], a=>ba_idx)
     freenext!(tree.ba_children)

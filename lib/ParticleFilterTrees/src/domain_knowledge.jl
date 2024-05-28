@@ -186,34 +186,27 @@ end
 
 FastRandomSolver(d=nothing) = FastRandomSolver(Random.default_rng(), d)
 
-struct FastRandomRolloutEstimator{ObsRequired, A, RNG <:AbstractRNG}
+struct FastRandomRolloutEstimator{A, RNG <:AbstractRNG}
     actions::A
     rng::RNG
     d::Union{Nothing, Int}
 end
 
-function FastRandomRolloutEstimator(pomdp::POMDP, estim::FastRandomSolver, obs_req::Bool)
+function FastRandomRolloutEstimator(pomdp::POMDP, estim::FastRandomSolver)
     RNG = typeof(estim.rng)
     act = actions(pomdp)
     A = typeof(act)
-    return FastRandomRolloutEstimator{obs_req,A,RNG}(act, estim.rng, estim.d)
+    return FastRandomRolloutEstimator{A,RNG}(act, estim.rng, estim.d)
 end
-
-const FRRE = FastRandomRolloutEstimator{false, A, RNG} where {A,RNG}
-const ObsReqFRRE = FastRandomRolloutEstimator{true, A, RNG} where {A,RNG}
 
 POMDPs.action(p::FastRandomRolloutEstimator, ::Any) = rand(p.rng, p.actions)
 
 function MCTS.convert_estimator(estimator::FastRandomSolver, ::Any, pomdp::POMDP)
-    return FastRandomRolloutEstimator(pomdp, estimator, is_obs_required(pomdp))
+    return FastRandomRolloutEstimator(pomdp, estimator)
 end
 
-function sr_gen(estimator::FastRandomRolloutEstimator{false}, pomdp::POMDP{S,A}, s::S, a::A) where {S,A}
-    return sr_gen(Val(false), estimator.rng, pomdp, s, a)
-end
-
-function sr_gen(estimator::FastRandomRolloutEstimator{true}, pomdp::POMDP{S,A}, s::S, a::A) where {S,A}
-    return sr_gen(Val(true), estimator.rng, pomdp, s, a)
+function sr_gen(estimator::FastRandomRolloutEstimator, pomdp::POMDP{S,A}, s::S, a::A) where {S,A}
+    return sr_gen(estimator.rng, pomdp, s, a)
 end
 
 function MCTS.estimate_value(estimator::FastRandomRolloutEstimator, pomdp::POMDP{S}, s::S, max_depth::Int) where S
@@ -233,3 +226,13 @@ function MCTS.estimate_value(estimator::FastRandomRolloutEstimator, pomdp::POMDP
 
     return r_total
 end
+
+function MCTS.estimate_value(est, pomdp::POMDP{S}, b::PFTBelief{S}, d::Int) where S
+    v = 0.0
+    max_depth = isnothing(est.d) ? d : est.d
+    for (s,w) in weighted_particles(b)
+        v += w*MCTS.estimate_value(est, pomdp, s, max_depth::Int)
+    end
+    return v
+end
+

@@ -12,7 +12,6 @@ export PFTDPWTree, PFTDPWSolver, SparsePFTSolver, PFTDPWPlanner, PFTBelief
 
 include("cache.jl")
 include("pushvector.jl")
-include("misc.jl")
 include("pftbelief.jl")
 include("tree.jl")
 
@@ -46,7 +45,7 @@ Base.@kwdef struct PFTDPWSolver{CRIT, RNG<:AbstractRNG, DA} <: Solver
     alpha_o::Float64        = 0.0 # Observation Progressive widening parameter
     k_a::Float64            = 5.0
     alpha_a::Float64        = 0.0 # Action Progressive widening parameter
-    criterion::CRIT         = nothing # MaxPoly(1.0)
+    criterion::CRIT         = MaxPoly(c=1.0) # used in policy_estimator
     rng::RNG                = Random.default_rng()
     value_estimator::Any    = FastRandomSolver()
     check_repeat_obs::Bool  = true
@@ -58,12 +57,11 @@ Base.@kwdef struct PFTDPWSolver{CRIT, RNG<:AbstractRNG, DA} <: Solver
     resample::Bool          = true
 end
 
-struct PFTDPWPlanner{SOL<:PFTDPWSolver, M<:POMDP, TREE<:PFTDPWTree, VE, S, T, PE} <: Policy
+struct PFTDPWPlanner{SOL<:PFTDPWSolver, M<:POMDP, TREE<:PFTDPWTree, VE, S, PE} <: Policy
     pomdp::M
     sol::SOL
     tree::TREE
     solved_VE::VE
-    obs_req::T
     cache::BeliefCache{S}
     solved_PE::PE
 end
@@ -73,8 +71,6 @@ SparsePFTSolver(;kwargs...) = PFTDPWSolver(;kwargs..., alpha_o=0.0, alpha_a=0.0,
 function POMDPs.solve(sol::PFTDPWSolver, pomdp::POMDP{S,A,O}) where {S,A,O}
     solved_ve = MCTS.convert_estimator(sol.value_estimator, sol, pomdp)
     solved_pe = sol.policy_estimator(sol, pomdp)
-
-    obs_req = is_obs_required(pomdp)
 
     @assert sol.enable_action_pw || length(actions(pomdp)) < Inf "Action space should have some defined length if enable_action_pw=false"
 
@@ -87,7 +83,7 @@ function POMDPs.solve(sol::PFTDPWSolver, pomdp::POMDP{S,A,O}) where {S,A,O}
         sol.k_a
         )
 
-    return PFTDPWPlanner(pomdp, sol, tree, solved_ve, Val(obs_req), cache, solved_pe)
+    return PFTDPWPlanner(pomdp, sol, tree, solved_ve, cache, solved_pe)
 end
 
 POMDPs.action(planner::PFTDPWPlanner, b) = first(action_info(planner, b))
@@ -124,39 +120,39 @@ function POMDPTools.action_info(planner::PFTDPWPlanner, b)
     return a, info
 end
 
-function mcts_main(planner::PFTDPWPlanner, b_idx::Int=1, d::Int=0)
-    (;tree, pomdp, sol) = planner
+function mcts_main(planner::PFTDPWPlanner, b_idx::Int=1, d::Int=0) # d is current depth, not max depth
+    (; tree, pomdp, sol, cache, solved_VE, solved_PE) = planner
+    (; max_depth, k_o, alpha_o, rng, check_repeat_obs, resample) = sol
 
-    # terminal belief or end of tree search
-    if d==sol.max_depth || isterminalbelief(tree.b[b_idx])
+    if d==max_depth || isterminalbelief(tree.b[b_idx])
         return 0.0
     end
 
     # select action
-    a, ba_idx = select_action(planner.solved_PE, tree, b_idx, d)
+    a, ba_idx = select_action(solved_PE, tree, b_idx, d)
 
     # observation/belief widening
-    if length(tree.ba_children[ba_idx]) ≤ sol.k_o*tree.Nha[ba_idx]^sol.alpha_o
+    if length(tree.ba_children[ba_idx]) ≤ k_o*tree.Nha[ba_idx]^alpha_o
         b = tree.b[b_idx]
-        p_idx = non_terminal_sample(sol.rng, pomdp, b)
+        p_idx = non_terminal_sample(rng, pomdp, b)
         sample_s = particle(b, p_idx)
-        sample_sp, o, sample_r = @gen(:sp,:o,:r)(pomdp, sample_s, a, sol.rng)
+        sample_sp, o, sample_r = @gen(:sp,:o,:r)(pomdp, sample_s, a, rng)
     
-        if sol.check_repeat_obs && haskey(tree.bao_children, (ba_idx, o))
+        if check_repeat_obs && haskey(tree.bao_children, (ba_idx, o))
             bp_idx = tree.bao_children[(ba_idx,o)]
             push!(tree.ba_children[ba_idx], bp_idx)
             r_togo = mcts_main(planner, bp_idx, d+1)
         else
-            bp_particles, bp_weights = gen_empty_belief(planner.cache, n_particles(b))
+            bp_particles, bp_weights = gen_empty_belief(cache, n_particles(b))
             bp, r, nt_prob = GenBelief(
-                sol.rng, bp_particles, bp_weights, planner.cache.resample, 
-                planner.obs_req, pomdp, b, a, o, p_idx, sample_sp, sample_r, sol.resample
+                rng, bp_particles, bp_weights, cache.resample, 
+                pomdp, b, a, o, p_idx, sample_sp, sample_r, resample
             )
-            bp_idx = insert_belief!(tree, bp, ba_idx, o, r, nt_prob, sol.check_repeat_obs)
-            r_togo = isterminalbelief(bp) ? 0.0 : MCTS.estimate_value(planner.solved_VE, pomdp, bp, sol.max_depth-(d+1))
+            bp_idx = insert_belief!(tree, bp, ba_idx, o, r, nt_prob, check_repeat_obs)
+            r_togo = isterminalbelief(bp) ? 0.0 : MCTS.estimate_value(solved_VE, pomdp, bp, max_depth-(d+1))
         end
     else
-        bp_idx = rand(sol.rng, tree.ba_children[ba_idx])
+        bp_idx = rand(rng, tree.ba_children[ba_idx])
         r_togo = mcts_main(planner, bp_idx, d+1)
     end
 
@@ -172,5 +168,6 @@ function mcts_main(planner::PFTDPWPlanner, b_idx::Int=1, d::Int=0)
 end
 
 include("domain_knowledge.jl")
+include("rollout.jl")
 
 end 

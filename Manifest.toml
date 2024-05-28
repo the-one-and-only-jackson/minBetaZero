@@ -2,7 +2,7 @@
 
 julia_version = "1.10.3"
 manifest_format = "2.0"
-project_hash = "034670b24dc018ab95e7b6b3b854294afbb9d8e1"
+project_hash = "0b048d4f6a30e6b0e444527f2e0b5b38182d7691"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -331,6 +331,12 @@ deps = ["IrrationalConstants", "LogExpFunctions", "NaNMath", "Random", "SpecialF
 git-tree-sha1 = "23163d55f885173722d1e4cf0f6110cdbaf7e272"
 uuid = "b552c78f-8df3-52c6-915a-8e097449b14b"
 version = "1.15.1"
+
+[[deps.DiscreteValueIteration]]
+deps = ["LinearAlgebra", "POMDPLinter", "POMDPTools", "POMDPs", "Printf", "SparseArrays"]
+git-tree-sha1 = "9ef7096a05ff90c0c7644cde929c2f6f028109f2"
+uuid = "4b033969-44f6-5439-a48b-c11fa3648068"
+version = "0.4.7"
 
 [[deps.Distributed]]
 deps = ["Random", "Serialization", "Sockets"]
@@ -1118,7 +1124,7 @@ version = "2.8.1"
 
 [[deps.ParticleFilterTrees]]
 deps = ["LinearAlgebra", "MCTS", "POMDPTools", "POMDPs", "ParticleFilters", "PushVectors", "Random"]
-path = "c:\\Users\\geekj\\Documents\\GitHub\\minBetaZero\\src\\..\\lib\\ParticleFilterTrees"
+path = "c:\\Users\\geekj\\Documents\\GitHub\\minBetaZero\\lib\\ParticleFilterTrees"
 uuid = "4e818e2d-9c2f-4c72-90ef-e40b8c35c855"
 version = "0.1.0"
 
@@ -1231,6 +1237,12 @@ git-tree-sha1 = "c7466c767062fa922a1689390a8aadb138253ecf"
 uuid = "36b54c61-190e-5a5f-82d5-6f0a962d7362"
 version = "0.2.1"
 
+[[deps.QMDP]]
+deps = ["DiscreteValueIteration", "POMDPLinter", "POMDPTools", "POMDPs", "Random"]
+git-tree-sha1 = "40792e051fe332ab043fef92ba90a1364a247b0b"
+uuid = "3aa3ecc9-5a5d-57c8-8188-3e47bd8068d2"
+version = "0.1.7"
+
 [[deps.Qt6Base_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "Fontconfig_jll", "Glib_jll", "JLLWrappers", "Libdl", "Libglvnd_jll", "OpenSSL_jll", "Vulkan_Loader_jll", "Xorg_libSM_jll", "Xorg_libXext_jll", "Xorg_libXrender_jll", "Xorg_libxcb_jll", "Xorg_xcb_util_cursor_jll", "Xorg_xcb_util_image_jll", "Xorg_xcb_util_keysyms_jll", "Xorg_xcb_util_renderutil_jll", "Xorg_xcb_util_wm_jll", "Zlib_jll", "libinput_jll", "xkbcommon_jll"]
 git-tree-sha1 = "37b7bb7aabf9a085e0044307e1717436117f2b3b"
@@ -1242,6 +1254,12 @@ deps = ["DataStructures", "LinearAlgebra"]
 git-tree-sha1 = "9b23c31e76e333e6fb4c1595ae6afa74966a729e"
 uuid = "1fd47b50-473d-5c70-9696-f719f8f3bcdc"
 version = "2.9.4"
+
+[[deps.QuickPOMDPs]]
+deps = ["NamedTupleTools", "POMDPTools", "POMDPs", "Random", "Tricks", "UUIDs"]
+git-tree-sha1 = "5a198408a330c4bff6e085831e542f75f4e5e38f"
+uuid = "8af83fb2-a731-493c-9049-9e19dbce6165"
+version = "0.2.14"
 
 [[deps.REPL]]
 deps = ["InteractiveUtils", "Markdown", "Sockets", "Unicode"]
