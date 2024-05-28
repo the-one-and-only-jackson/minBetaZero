@@ -23,20 +23,14 @@ export NetworkParameters, ActorCritic, getloss
 include("pft_interface.jl")
 export NetworkWrapper, PUCT, get_value, get_policy, input_representation
 
-export betazero
+export betazero, minBetaZeroParameters
 
 function setup()
     Pkg.develop(PackageSpec(url=joinpath(@__DIR__,"..","lib","ParticleFilterTrees")))
 end
 
-
-
-function gen_data(pomdp, net; t_max=100, n_episodes=2)
-    nw = NetworkWrapper(; net)
-
-    solver = PFTDPWSolver(
-        value_estimator     = nw,
-        policy_estimator    = PUCT(; net=nw, c=100.0),
+@kwdef struct minBetaZeroParameters
+    PFTDPWSolver_args = (;
         max_depth           = 10,
         n_particles         = 100,
         tree_queries        = 100,
@@ -50,11 +44,34 @@ function gen_data(pomdp, net; t_max=100, n_episodes=2)
         resample            = true,
         treecache_size      = 1_000, 
         beliefcache_size    = 1_000,
-        criterion           = ParticleFilterTrees.MaxPoly(95., 0.39) 
     )
-    planner = solve(solver, pomdp)
+    t_max = 100
+    n_episodes = 500
+    c_puct = 100.0
+    n_iter = 20
+    noise_alpha = 0.25
+    noise_param = 0.1
+    train_frac = 0.8
+    batchsize = 128
+    lr = 3e-4
+    lambda = 0.0
+    n_epochs = 50
+    plot_training = false
+end
 
-    bmdp = ParticleBeliefMDP(pomdp)
+function gen_data(pomdp, net, params::minBetaZeroParameters)
+    nw = NetworkWrapper(; net)
+
+    n_episodes = params.n_episodes
+
+    planner = solve(
+        PFTDPWSolver(;
+            value_estimator  = nw,
+            policy_estimator = PUCT(; net=nw, c=params.c_puct),
+            params.PFTDPWSolver_args...
+        ),
+        pomdp
+    )
 
     @info "Number of processes: $(nworkers())"
     progress = Progress(ceil(Int, n_episodes/nworkers()) * nworkers())
@@ -71,7 +88,7 @@ function gen_data(pomdp, net; t_max=100, n_episodes=2)
         ret_vec = Float32[]
 
         for _ in 1:ceil(Int, n_episodes/nworkers())
-            episode_data = gen_episode(bmdp, nw, planner; t_max)
+            episode_data = gen_episode(pomdp, nw, planner, params)
             dst = (episode_data.b, episode_data.v, episode_data.p, episode_data.g)
             src = (b_vec, v_vec, p_vec, ret_vec)
             append!.(src, dst)
@@ -93,13 +110,11 @@ function gen_data(pomdp, net; t_max=100, n_episodes=2)
     return NamedTuple{k}(reduce((args...)->cat(args...; dims=ndims(first(args))), (d[key] for d in data)) for key in k)
 end
 
-function gen_episode(bmdp, nw, planner; t_max=100)
-    b = rand(initialstate(bmdp))
+function gen_episode(pomdp, nw, planner, params::minBetaZeroParameters)
+    t_max = params.t_max
 
-    # pomdp = bmdp.pomdp
-    # up = BootstrapFilter(bmdp.pomdp, 500)
-    # b = initialize_belief(up, initialstate(pomdp))
-    # s = rand(initialstate(pomdp))
+    bmdp = ParticleBeliefMDP(pomdp)
+    b = rand(initialstate(bmdp))
 
     b_vec = typeof(b)[]
     p_vec = Vector{Float32}[]
@@ -108,13 +123,8 @@ function gen_episode(bmdp, nw, planner; t_max=100)
     for _ in 1:t_max
         empty!(nw)
         _, a_info = action_info(planner, b)
-        p = calculate_targetdist(bmdp.pomdp, a_info.tree)
+        p = calculate_targetdist(pomdp, a_info.tree)
         a_idx = sample_cat(p) # bmdp uses action indexes
-
-        # a = bmdp.ordered_actions[a_idx]
-        # s,r,o = @gen(:sp, :r, :o)(pomdp, s, a)
-        # bp = update(up, b, a, o)
-
         bp, r = @gen(:sp,:r)(bmdp, b, a_idx)
         push!.((b_vec,p_vec,r_vec), (b,p,r))
         b = bp
@@ -155,7 +165,9 @@ function calculate_targetdist(pomdp, tree; zq=1, zn=1)
     P
 end
 
-function train!(net, data; train_frac=0.8, batchsize=128, lr = 3e-4, lambda = 0.0, n_epochs = 50)
+function train!(net, data, params::minBetaZeroParameters)
+    (; train_frac, batchsize, lr, lambda, n_epochs) = params
+
     split_data = Flux.splitobs(data, at=train_frac)
     train_data = Flux.DataLoader(split_data[1]; batchsize=min(batchsize, Flux.numobs(split_data[1])), shuffle=true, partial=false)
     valid_data = Flux.DataLoader(split_data[2]; batchsize=min(4*batchsize, Flux.numobs(split_data[2])), shuffle=true, partial=false)
@@ -214,35 +226,30 @@ function train!(net, data; train_frac=0.8, batchsize=128, lr = 3e-4, lambda = 0.
     return net, info
 end
 
-function betazero(
-    pomdp::POMDP;
-    noise_alpha = 0.25,
-    noise_param = 0.1,
-    n_episodes = 500,
-    n_iter = 50,
-    t_max = 100,
-    nn_params::NetworkParameters
-    )
-    
-    net = ActorCritic(nn_params)
+function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
+    (; n_iter, noise_alpha, noise_param, plot_training) = params
 
     for itr in 1:n_iter
         @info "Gathering Data - Iteration: $itr"
-        data = gen_data(pomdp, net; t_max, n_episodes)
+        data = gen_data(pomdp, net, params)
         @info "Mean return $(mean(data.returns)) +/- $(std(data.returns)/sqrt(length(data.returns)))"
 
         noise = rand(Dirichlet(size(data.policy,1), Float32(noise_param)), size(data.policy,2))
         alpha = Float32(noise_alpha)
         noisy_policy = (1-alpha)*data.policy + alpha*noise
 
-        @info "Training"
-        net, train_info = train!(net, (; x=data.belief, value_target=data.value, policy_target=noisy_policy))
+        training_data = (; x=data.belief, value_target=data.value, policy_target=noisy_policy)
 
-        pv = plot(train_info[:train_R]; c=1, label="train", ylabel="FVU", title="Loss")
-        plot!(pv, train_info[:valid_R]; c=2, label="valid")
-        pp = plot(train_info[:train_KL]; c=1, label="train", ylabel="Policy KL")
-        plot!(pp, train_info[:valid_KL]; c=2, label="valid", xlabel="Epochs")
-        plot(pv, pp; layout=(2,1)) |> display
+        @info "Training"
+        net, train_info = train!(net, training_data, params)
+
+        if plot_training
+            pv = plot(train_info[:train_R]; c=1, label="train", ylabel="FVU", title="Training Information")
+            plot!(pv, train_info[:valid_R]; c=2, label="valid")
+            pp = plot(train_info[:train_KL]; c=1, label="train", ylabel="Policy KL")
+            plot!(pp, train_info[:valid_KL]; c=2, label="valid", xlabel="Epochs")
+            plot(pv, pp; layout=(2,1)) |> display
+        end
     end
 end
 

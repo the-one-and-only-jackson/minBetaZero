@@ -63,7 +63,37 @@ end
 #     return out_arr
 # end
 
-nn_params = NetworkParameters(
+params = minBetaZeroParameters(
+    PFTDPWSolver_args = (;
+        max_depth           = 10,
+        n_particles         = 100,
+        tree_queries        = 100,
+        max_time            = Inf,
+        k_a                 = 5.,
+        alpha_a             = 0.,
+        enable_action_pw    = false,
+        k_o                 = 24.,
+        alpha_o             = 0.,
+        check_repeat_obs    = true,
+        resample            = true,
+        treecache_size      = 1_000, 
+        beliefcache_size    = 1_000,
+    ),
+    t_max = 100,
+    n_episodes = 500,
+    c_puct = 100.0,
+    n_iter = 20,
+    noise_alpha = 0.25,
+    noise_param = 0.1,
+    train_frac = 0.8,
+    batchsize = 128,
+    lr = 3e-4,
+    lambda = 0.0,
+    n_epochs = 50,
+    plot_training = true
+)
+
+nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
     action_size=5,
     input_size=(1,),
     critic_loss = Flux.Losses.logitcrossentropy,
@@ -76,7 +106,7 @@ nn_params = NetworkParameters(
     shared_out_size = 2 # must manually set... fix at a later date...        
 )
 
-betazero(LightDarkPOMDP(); nn_params, n_episodes=500, t_max=100, noise_alpha=0.)
+net = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params))
 
 
 
