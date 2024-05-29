@@ -47,6 +47,7 @@ end
     )
     t_max = 100
     n_episodes = 500
+    n_workers = 100
     n_steps = 5000
     use_episodes = true # gather data for at least n_episodes or at least n_steps
     c_puct = 100.0
@@ -60,27 +61,19 @@ end
     n_epochs = 50
     plot_training = false
     train_dev = cpu
+    early_stop = 10
+    n_warmup = 500
 end
 
 function gen_data(pomdp, net, params::minBetaZeroParameters)
-    (; use_episodes, n_steps, n_episodes) = params
-
-    nw = NetworkWrapper(; net)
-
-    planner = solve(
-        PFTDPWSolver(;
-            value_estimator  = nw,
-            policy_estimator = PUCT(; net=nw, c=params.c_puct),
-            params.PFTDPWSolver_args...
-        ),
-        pomdp
-    )
+    (; use_episodes, n_steps, n_episodes, n_workers) = params
 
     progress = Progress(use_episodes ? n_episodes : n_steps)
-    channel = RemoteChannel(()->Channel{Int}(), 1)
+    # channel = RemoteChannel(()->Channel{Int}(), 1)
+    channel = Channel{Int}(1)
 
     total_steps = 0
-    async_loop = @async while true
+    async_loop = Threads.@spawn while true
         step = take!(channel)
         if step == 0
             finish!(progress)
@@ -95,7 +88,15 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
         end
     end
 
-    data = pmap(1:nworkers()) do i
+    worker_querries = [Channel{Any}(1) for _ in 1:n_workers]
+    master_responses = [Channel{Any}(1) for _ in 1:n_workers]
+
+    function work_fun(i)
+        worker_net = function(x; kwargs...)
+            put!(worker_querries[i], x)
+            take!(master_responses[i])
+        end
+
         b_vec = []
         v_vec = Float32[]
         p_vec = Vector{Float32}[]
@@ -104,8 +105,8 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
         episodes = 0
         steps = 0
 
-        while (use_episodes && episodes < n_episodes/nworkers()) || (!use_episodes && steps < n_steps/nworkers())
-            episode_data = gen_episode(pomdp, nw, planner, params)
+        while (use_episodes && episodes < n_episodes/n_workers) || (!use_episodes && steps < n_steps/n_workers)
+            episode_data = gen_episode(pomdp, worker_net, params)
             dst = (episode_data.b, episode_data.v, episode_data.p, episode_data.g)
             src = (b_vec, v_vec, p_vec, ret_vec)
             append!.(src, dst)
@@ -128,6 +129,37 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
         )
     end
 
+    master_net = net |> gpu
+
+    futures = [Threads.@spawn work_fun(i) for i in 1:n_workers]
+
+    while !all(istaskdone, futures)
+        idxs = isready.(worker_querries)
+        iszero(count(idxs)) && continue
+
+        if count(idxs) == 1
+            idx = findfirst(idxs)
+            querries = take!(worker_querries[idx])
+            results = reshape(querries, size(querries)..., 1) |> gpu |> master_net |> cpu
+            put!(master_responses[idx], results)    
+        else
+            querries = take!.(worker_querries[idxs])
+            try
+                querries = stack(querries)
+            catch e
+                println("Num querries: $(length(querries))")
+                println("size querries: $(size.(querries))")
+                thow(e)
+            end
+            results = querries |> gpu |> master_net |> cpu
+            dims = size(first(results),ndims(first(results)))
+            split_results = [(; value=results.value[:,i], policy=results.policy[:,i]) for i in 1:dims]
+            put!.(master_responses[idxs], split_results)
+        end
+    end
+
+    data = fetch.(futures)
+
     put!(channel, 0)
     wait(async_loop)
 
@@ -135,8 +167,19 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
     return NamedTuple{k}(reduce((args...)->cat(args...; dims=ndims(first(args))), (d[key] for d in data)) for key in k)
 end
 
-function gen_episode(pomdp, nw, planner, params::minBetaZeroParameters)
-    t_max = params.t_max
+function gen_episode(pomdp, net, params::minBetaZeroParameters)
+    (; t_max, c_puct, PFTDPWSolver_args) = params
+
+    nw = NetworkWrapper(; net)
+
+    planner = solve(
+        PFTDPWSolver(;
+            value_estimator  = nw,
+            policy_estimator = PUCT(; net=nw, c=c_puct),
+            PFTDPWSolver_args...
+        ),
+        pomdp
+    )
 
     bmdp = ParticleBeliefMDP(pomdp)
     b = rand(initialstate(bmdp))
@@ -159,13 +202,13 @@ function gen_episode(pomdp, nw, planner, params::minBetaZeroParameters)
         end
     end
 
-    r_last = bootstrap_val = term_flag ? zero(eltype(r_vec)) : get_value(nw, b)
+    r_last = zero(eltype(r_vec))
     gamma = discount(bmdp)
     for i in length(r_vec):-1:1
         r_last = r_vec[i] += gamma * r_last
     end
 
-    episode_return = r_vec[1] - bootstrap_val * gamma^t_max
+    episode_return = r_vec[1]
 
     return (; b=b_vec, v=r_vec, p=p_vec, g=episode_return)
 end
@@ -191,7 +234,7 @@ function calculate_targetdist(pomdp, tree; zq=1, zn=1)
 end
 
 function train!(net, data, params::minBetaZeroParameters)
-    (; train_frac, batchsize, lr, lambda, n_epochs, train_dev) = params
+    (; train_frac, batchsize, lr, lambda, n_epochs, train_dev, early_stop, n_warmup) = params
 
     split_data = Flux.splitobs(data, at=train_frac) 
 
@@ -207,6 +250,11 @@ function train!(net, data, params::minBetaZeroParameters)
     net = train_dev(net)
     opt = Flux.setup(Flux.Optimiser(Flux.Adam(lr), WeightDecay(lr*lambda)), net)
 
+    checkpoint = deepcopy(net)
+    checkpoint_val = Inf32
+    checkpoint_pol = Inf32
+    last_checkpoint = 0
+
     train_info = Dict(:policy_loss=>Float32[], :policy_KL=>Float32[], :value_loss=>Float32[], :value_FVU=>Float32[])
     valid_info = Dict(:policy_loss=>Float32[], :policy_KL=>Float32[], :value_loss=>Float32[], :value_FVU=>Float32[])
 
@@ -221,9 +269,16 @@ function train!(net, data, params::minBetaZeroParameters)
         losses.value_loss + losses.policy_loss
     end
     
-    @showprogress for _ in 1:n_epochs
+    epochs_completed = 0
+    grad_steps = 0
+    @showprogress for epoch in 1:n_epochs
+        epochs_completed += 1
         Flux.trainmode!(net)
-        for (; x, value_target, policy_target) in train_data    
+        for (; x, value_target, policy_target) in train_data
+            grad_steps += 1
+            lr_scale = min(grad_steps / n_warmup, 1 - (grad_steps - n_warmup)/(n_epochs - n_warmup))
+            Flux.adjust!(opt; eta=lr_scale*lr, lambda=lr_scale*lr*lambda)    
+    
             grads = Flux.gradient(net) do net
                 lossfun(net, x; value_target, policy_target, info=train_info, policy_entropy=Etrain, value_var=varVtrain)
             end
@@ -233,6 +288,18 @@ function train!(net, data, params::minBetaZeroParameters)
         Flux.testmode!(net)
         for (; x, value_target, policy_target) in valid_data    
             lossfun(net, x; value_target, policy_target, info=valid_info, policy_entropy=Evalid, value_var=varVvalid)
+        end
+
+        epoch_pol = mean(valid_info[:policy_loss][end-length(valid_data)+1:end])
+        epoch_val = mean(valid_info[:value_loss][end-length(valid_data)+1:end])
+        if epoch_pol < checkpoint_pol && epoch_val < checkpoint_val
+            checkpoint = deepcopy(net)
+            checkpoint_val = epoch_val
+            checkpoint_pol = epoch_pol   
+            last_checkpoint = epoch  
+        end
+        if epoch - last_checkpoint > early_stop
+            break
         end
     end
 
@@ -248,10 +315,10 @@ function train!(net, data, params::minBetaZeroParameters)
     )
 
     for (k,v) in info
-        info[k] = dropdims(mean(reshape(v,:,n_epochs); dims=1); dims=1)
+        info[k] = dropdims(mean(reshape(v,:,epochs_completed); dims=1); dims=1)
     end
 
-    return cpu(net), info
+    return cpu(checkpoint), info
 end
 
 function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)

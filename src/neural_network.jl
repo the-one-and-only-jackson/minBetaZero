@@ -13,7 +13,7 @@ export NetworkParameters, ActorCritic, getloss
     hidden_layers::Int = 2
     p_dropout::Float64 = 0                         # Probability of dropout
     shared_net::Any = identity                       # shared network 
-    shared_out_size::Int = input_size[1]
+    shared_out_size::Tuple{Vararg{Int}} = input_size
     critic_categories::Vector = []
     actor_loss::Function = Flux.Losses.logitcrossentropy
     critic_loss::Function = Flux.Losses.mse
@@ -30,6 +30,9 @@ end
 Flux.@layer :expand ActorCritic
 
 function ActorCritic(nn_params::NetworkParameters)
+    @assert length(nn_params.shared_out_size) <= 2
+    @assert !(length(nn_params.shared_out_size) == 2 && nn_params.shared_out_size[2] != 2)
+
     ActorCritic(
         SharedInput(nn_params), 
         DiscreteActor(nn_params), 
@@ -39,15 +42,25 @@ end
 
 function (ac::ActorCritic)(x; logits=false)
     encoded_input = ac.shared(x)
-    value = ac.critic(encoded_input)
-    policy = ac.actor(encoded_input; logits)
+    if encoded_input isa Tuple
+        value = ac.critic(encoded_input[1])
+        policy = ac.actor(encoded_input[2]; logits)
+    else
+        value = ac.critic(encoded_input)
+        policy = ac.actor(encoded_input; logits)
+    end
     return (; value, policy)
 end
 
 function getloss(ac::ActorCritic, input; value_target, policy_target)
     encoded_input = ac.shared(input)
-    value_loss, value_mse = getloss(ac.critic, encoded_input; value_target)
-    policy_loss = getloss(ac.actor, encoded_input; policy_target)
+    if encoded_input isa Tuple
+        value_loss, value_mse = getloss(ac.critic, encoded_input[1]; value_target)
+        policy_loss = getloss(ac.actor, encoded_input[2]; policy_target)
+    else
+        value_loss, value_mse = getloss(ac.critic, encoded_input; value_target)
+        policy_loss = getloss(ac.actor, encoded_input; policy_target)
+    end
     return (; value_loss, value_mse, policy_loss)
 end
 
@@ -67,8 +80,8 @@ end
 function (shared::SharedInput)(x)
     scaled_x = shared.scale(x)
     shared_out = shared.net(scaled_x)
-    @assert all(isfinite, scaled_x)
-    @assert all(isfinite, shared_out) "$x"
+    # @assert all(isfinite, scaled_x)
+    # @assert all(isfinite, shared_out) "$x"
     return shared_out
 end
 
@@ -84,7 +97,7 @@ Flux.@layer :expand DiscreteActor
 function DiscreteActor(nn_params::NetworkParameters)
     actor_net = mlp(; 
         dims = [
-            nn_params.shared_out_size, 
+            nn_params.shared_out_size[1], 
             fill(nn_params.neurons, nn_params.hidden_layers)..., 
             nn_params.action_size
         ],
@@ -138,7 +151,7 @@ function Critic(nn_params::NetworkParameters)
     end
     critic_net = mlp(; 
         dims = [
-            nn_params.shared_out_size, 
+            nn_params.shared_out_size[1], 
             fill(nn_params.neurons, nn_params.hidden_layers)..., 
             critic_head_size
         ],

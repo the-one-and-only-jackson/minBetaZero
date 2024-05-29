@@ -9,10 +9,10 @@ Note: Only looking at batch = 1 (MCTS)!
 """
 function network_input(belief)
     b = convert(AbstractArray{Float32}, input_representation(belief))
-    return Flux.unsqueeze(b; dims=ndims(b)+1) # add extra single dimension (batch = 1)
+    # return Flux.unsqueeze(b; dims=ndims(b)+1) # add extra single dimension (batch = 1)
 end
 
-@kwdef struct NetworkWrapper{N<:ActorCritic}
+@kwdef struct NetworkWrapper{N}
     net::N
     input::Vector{Any} = Any[] # gross, fix later
     value::Vector{Float32} = Float32[]
