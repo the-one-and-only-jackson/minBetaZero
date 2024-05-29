@@ -6,9 +6,9 @@ struct ParticleBeliefMDP{P<:POMDP, B<:ParticleFilters.AbstractParticleBelief, A}
     _actions::Base.OneTo{Int}
 end
 function ParticleBeliefMDP(pomdp::POMDP{S,A}) where {S,A}
-    ordered_actions = sort(actions(pomdp); lt=(x,y)->actionindex(pomdp,x)<actionindex(pomdp,y))
-    _actions = Base.OneTo(length(ordered_actions))
-    ParticleBeliefMDP{typeof(pomdp), PFTBelief{S}, typeof(ordered_actions)}(pomdp, ordered_actions, _actions)
+    _ordered_actions = ordered_actions(pomdp)
+    _actions = Base.OneTo(length(_ordered_actions))
+    ParticleBeliefMDP{typeof(pomdp), PFTBelief{S}, typeof(_ordered_actions)}(pomdp, _ordered_actions, _actions)
 end
 
 POMDPs.actions(bmdp::ParticleBeliefMDP) = bmdp._actions

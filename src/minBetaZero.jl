@@ -1,10 +1,8 @@
 module minBetaZero
 
-using Distributed
-
 using Flux, CUDA
 using POMDPs, POMDPModelTools, POMDPTools
-using ParticleFilters, MCTS
+using ParticleFilters
 using Statistics, Distributions, Random
 using Pkg
 using ProgressMeter, Plots
@@ -20,8 +18,11 @@ include("neural_network.jl")
 using .NeuralNet
 export NetworkParameters, ActorCritic, getloss
 
-include("pft_interface.jl")
-export NetworkWrapper, PUCT, get_value, get_policy, input_representation
+# include("pft_interface.jl")
+# export NetworkWrapper, PUCT, get_value, get_policy, input_representation
+export input_representation
+function input_representation end
+
 
 export betazero, minBetaZeroParameters
 
@@ -35,40 +36,34 @@ end
         n_particles         = 100,
         tree_queries        = 100,
         max_time            = Inf,
-        k_a                 = 5.,
-        alpha_a             = 0.,
-        enable_action_pw    = false,
         k_o                 = 24.,
         alpha_o             = 0.,
         check_repeat_obs    = true,
         resample            = true,
         treecache_size      = 1_000, 
         beliefcache_size    = 1_000,
+        cscale              = 1.,
+        cvisit              = 50.
     )
-    t_max = 100
-    n_episodes = 500
-    n_workers = 100
-    n_steps = 5000
-    use_episodes = true # gather data for at least n_episodes or at least n_steps
-    c_puct = 100.0
-    n_iter = 20
-    noise_alpha = 0.25
-    noise_param = 0.1
-    train_frac = 0.8
-    batchsize = 128
-    lr = 3e-4
-    lambda = 0.0
-    n_epochs = 50
+    t_max       = 100
+    n_episodes  = 500
+    n_workers   = 100
+    n_iter      = 20
+    train_frac  = 0.8
+    batchsize   = 128
+    lr          = 3e-4
+    lambda      = 0.0
+    n_epochs    = 50
     plot_training = false
-    train_dev = cpu
-    early_stop = 10
-    n_warmup = 500
+    train_dev   = cpu
+    early_stop  = 10
+    n_warmup    = 500
 end
 
 function gen_data(pomdp, net, params::minBetaZeroParameters)
-    (; use_episodes, n_steps, n_episodes, n_workers) = params
+    (; n_episodes, n_workers) = params
 
-    progress = Progress(use_episodes ? n_episodes : n_steps)
+    progress = Progress(n_episodes)
     # channel = RemoteChannel(()->Channel{Int}(), 1)
     channel = Channel{Int}(1)
 
@@ -99,26 +94,18 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
 
         b_vec = []
         v_vec = Float32[]
-        p_vec = Vector{Float32}[]
+        p_vec = []
         ret_vec = Float32[]
 
         episodes = 0
-        steps = 0
-
-        while (use_episodes && episodes < n_episodes/n_workers) || (!use_episodes && steps < n_steps/n_workers)
+        while episodes < max(1,n_episodes/n_workers)
             episode_data = gen_episode(pomdp, worker_net, params)
             dst = (episode_data.b, episode_data.v, episode_data.p, episode_data.g)
             src = (b_vec, v_vec, p_vec, ret_vec)
             append!.(src, dst)
 
             episodes += 1
-            steps += length(episode_data.v)
-
-            if use_episodes
-                put!(channel, 1)
-            else
-                put!(channel, length(episode_data.v))
-            end
+            put!(channel, 1)
         end
 
         return (; 
@@ -140,18 +127,13 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
         if count(idxs) == 1
             idx = findfirst(idxs)
             querries = take!(worker_querries[idx])
-            results = reshape(querries, size(querries)..., 1) |> gpu |> master_net |> cpu
+            querries_batched = reshape(querries, size(querries)..., 1) |> gpu
+            results = master_net(querries_batched; logits=true) |> cpu
             put!(master_responses[idx], results)    
         else
             querries = take!.(worker_querries[idxs])
-            try
-                querries = stack(querries)
-            catch e
-                println("Num querries: $(length(querries))")
-                println("size querries: $(size.(querries))")
-                thow(e)
-            end
-            results = querries |> gpu |> master_net |> cpu
+            querries_batched = querries |> stack |> gpu
+            results = master_net(querries_batched; logits=true) |> cpu
             dims = size(first(results),ndims(first(results)))
             split_results = [(; value=results.value[:,i], policy=results.policy[:,i]) for i in 1:dims]
             put!.(master_responses[idxs], split_results)
@@ -168,14 +150,14 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
 end
 
 function gen_episode(pomdp, net, params::minBetaZeroParameters)
-    (; t_max, c_puct, PFTDPWSolver_args) = params
-
-    nw = NetworkWrapper(; net)
+    (; t_max, PFTDPWSolver_args) = params
 
     planner = solve(
         PFTDPWSolver(;
-            value_estimator  = nw,
-            policy_estimator = PUCT(; net=nw, c=c_puct),
+            getpolicyvalue = function(x)
+                out = net(input_representation(x))
+                return (; value=out.value[], policy=vec(out.policy))
+            end,
             PFTDPWSolver_args...
         ),
         pomdp
@@ -187,14 +169,14 @@ function gen_episode(pomdp, net, params::minBetaZeroParameters)
     b_vec = typeof(b)[]
     p_vec = Vector{Float32}[]
     r_vec = Float32[]
+    p_nt = Float32[]
     term_flag = false
     for _ in 1:t_max
-        empty!(nw)
-        _, a_info = action_info(planner, b)
-        p = calculate_targetdist(pomdp, a_info.tree)
-        a_idx = sample_cat(p) # bmdp uses action indexes
-        bp, r = @gen(:sp,:r)(bmdp, b, a_idx)
-        push!.((b_vec,p_vec,r_vec), (b,p,r))
+        a, a_info = action_info(planner, b)
+        aid = actionindex(pomdp,a)
+        p = Flux.onehot(aid, 1:length(actions(pomdp)))
+        bp, r, info = @gen(:sp,:r,:info)(bmdp, b, aid)
+        push!.((b_vec,p_vec,r_vec,p_nt), (b,p,r,info))
         b = bp
         if ParticleFilterTrees.isterminalbelief(b)
             term_flag = true
@@ -202,35 +184,14 @@ function gen_episode(pomdp, net, params::minBetaZeroParameters)
         end
     end
 
-    r_last = zero(eltype(r_vec))
     gamma = discount(bmdp)
-    for i in length(r_vec):-1:1
-        r_last = r_vec[i] += gamma * r_last
+    for i in length(r_vec)-1:-1:1
+        r_vec[i] += p_nt[i] * gamma * r_vec[i+1]
     end
 
     episode_return = r_vec[1]
 
     return (; b=b_vec, v=r_vec, p=p_vec, g=episode_return)
-end
-
-function calculate_targetdist(pomdp, tree; zq=1, zn=1)
-    # P = Vector{Float32}(undef, length(actions(pomdp)))
-    P = zeros(Float32, length(actions(pomdp)))
-    qmax = -Inf
-    nsum = 0.0
-    for (_,aid) in tree.b_children[1]
-        qmax = max(qmax, tree.Qha[aid])
-        nsum += tree.Nha[aid]
-    end
-    for (a,aid) in tree.b_children[1]
-        n_norm = tree.Nha[aid] / nsum
-        q_norm = exp(tree.Qha[aid] - qmax)
-        P[actionindex(pomdp,a)] = n_norm^zn * q_norm^zq
-    end
-    @assert all(isfinite, P) "$P, $(tree.Qha[1]), $(tree.Nha[1])"
-    P ./= sum(P)
-    @assert all(0 .<= P .<= 1) "$P, $(tree.Qha[1]), $(tree.Nha[1])"
-    P
 end
 
 function train!(net, data, params::minBetaZeroParameters)
@@ -276,7 +237,7 @@ function train!(net, data, params::minBetaZeroParameters)
         Flux.trainmode!(net)
         for (; x, value_target, policy_target) in train_data
             grad_steps += 1
-            lr_scale = min(grad_steps / n_warmup, 1 - (grad_steps - n_warmup)/(n_epochs - n_warmup))
+            lr_scale = min(grad_steps / n_warmup, 1 - (grad_steps - n_warmup)/(n_epochs*length(train_data) - n_warmup))
             Flux.adjust!(opt; eta=lr_scale*lr, lambda=lr_scale*lr*lambda)    
     
             grads = Flux.gradient(net) do net
@@ -322,7 +283,7 @@ function train!(net, data, params::minBetaZeroParameters)
 end
 
 function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
-    (; n_iter, noise_alpha, noise_param, plot_training) = params
+    (; n_iter, plot_training) = params
 
     @info "Number of processes: $(nworkers())"
 
@@ -352,14 +313,8 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         # This is so we get the stats after the n_iter network update
         itr == n_iter+1 && break
 
-        noise = rand(Dirichlet(size(data.policy,1), Float32(noise_param)), size(data.policy,2))
-        alpha = Float32(noise_alpha)
-        noisy_policy = (1-alpha)*data.policy + alpha*noise
-
-        training_data = (; x=data.belief, value_target=data.value, policy_target=noisy_policy)
-
         @info "Training"
-        net, train_info = train!(net, training_data, params)
+        net, train_info = train!(net, (; x=data.belief, value_target=data.value, policy_target=data.policy), params)
 
         if plot_training
             pv = plot(train_info[:train_R]; c=1, label="train", ylabel="FVU", title="Training Information")
