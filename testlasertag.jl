@@ -31,11 +31,11 @@ params = minBetaZeroParameters(
         beliefcache_size    = 1_000,
     ),
     t_max = 100,
-    n_episodes = 256,
-    n_workers = 256,
-    n_iter = 10,
+    n_episodes = 512,
+    n_workers = 16,
+    n_iter = 20,
     train_frac = 0.8,
-    batchsize = 128,
+    batchsize = 256,
     lr = 10e-4,
     lambda = 0.0,
     n_epochs = 50,
@@ -81,6 +81,8 @@ planner = solve(
 
 up = BootstrapFilter(pomdp, 500)
 
+ret_mcts = []
+
 b = initialize_belief(up, initialstate(pomdp))
 s = rand(initialstate(pomdp))
 s_vec = []
@@ -94,8 +96,35 @@ for _ in 1:100
     s = sp
     isterminal(pomdp, s) && break
 end
-length(r_vec)
-r_vec' * discount(pomdp) .^ (0:length(r_vec)-1)
+push!(ret_mcts, r_vec' * discount(pomdp) .^ (0:length(r_vec)-1))
+
+mean(ret_mcts)
+std(ret_mcts)/sqrt(length(ret_mcts))
+
+
+ret_net = []
+
+b = initialize_belief(up, initialstate(pomdp))
+s = rand(initialstate(pomdp))
+s_vec = []
+b_vec = []
+r_vec = []
+for _ in 1:100
+    a = actions(pomdp)[argmax(net(input_representation(b)).policy)]
+    sp, r, o = @gen(:sp, :r, :o)(pomdp, s, a)
+    push!.((b_vec,r_vec,s_vec), (b,r,s))
+    b = update(up, b, a, o)
+    s = sp
+    isterminal(pomdp, s) && break
+end
+push!(ret_net, r_vec' * discount(pomdp) .^ (0:length(r_vec)-1))
+
+mean(ret_net)
+std(ret_net)/sqrt(length(ret_net))
+
+
+
+
 
 
 

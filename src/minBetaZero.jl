@@ -9,7 +9,6 @@ using ProgressMeter, Plots
 
 # include("../lib/ParticleFilterTrees/src/ParticleFilterTrees.jl")
 using ParticleFilterTrees
-export PFTDPWTree, PFTDPWSolver, SparsePFTSolver, PFTDPWPlanner, PFTBelief 
 
 include("beliefmdp.jl")
 export ParticleBeliefMDP
@@ -31,7 +30,7 @@ function setup()
 end
 
 @kwdef struct minBetaZeroParameters
-    PFTDPWSolver_args = (;
+    GumbelSolver_args = (;
         max_depth           = 10,
         n_particles         = 100,
         tree_queries        = 100,
@@ -43,11 +42,12 @@ end
         treecache_size      = 1_000, 
         beliefcache_size    = 1_000,
         cscale              = 1.,
-        cvisit              = 50.
+        cvisit              = 50.,
+        stochastic_root     = true,
+        m_acts_init
     )
     t_max       = 100
     n_episodes  = 500
-    n_workers   = 100
     n_iter      = 20
     train_frac  = 0.8
     batchsize   = 128
@@ -61,66 +61,52 @@ end
 end
 
 function gen_data(pomdp, net, params::minBetaZeroParameters)
-    (; n_episodes, n_workers) = params
+    (; n_episodes) = params
+
+    belief = Vector{Array{Float32}}(undef, n_episodes)
+    value = Vector{Vector{Float32}}(undef, n_episodes)
+    policy = Vector{Vector{Int}}(undef, n_episodes)
+    returns = Vector{Float32}(undef, n_episodes)
 
     progress = Progress(n_episodes)
-    # channel = RemoteChannel(()->Channel{Int}(), 1)
-    channel = Channel{Int}(1)
+    progress_channel = Channel{Bool}(1)
 
-    total_steps = 0
-    async_loop = Threads.@spawn while true
-        step = take!(channel)
-        if step == 0
-            finish!(progress)
-            break
-        elseif total_steps < progress.n # i dont know how to deal with progressmeter correctly
-            total_steps += step
-            if total_steps <= progress.n
-                next!(progress; step)
-            else
-                next!(progress; step=progress.n-(total_steps-step))
+    worker_querries = [Channel{Any}(1) for _ in 1:n_episodes]
+    master_responses = [Channel{Any}(1) for _ in 1:n_episodes]
+
+    @sync begin
+        async_loop = Threads.@spawn while take!(progress_channel)
+            next!(progress)
+        end
+
+        Threads.@spawn master_function(net, async_loop, worker_querries, master_responses)
+
+        thread_vec = Vector{Any}(undef, n_episodes)
+        for i in 1:n_episodes 
+            thread_vec[i] = Threads.@spawn begin
+                _data = work_fun(pomdp, params, worker_querries[i], master_responses[i])
+                belief[i] = _data.belief
+                value[i] = _data.value
+                policy[i] = _data.policy
+                returns[i] = _data.returns
+                put!(progress_channel, true)
             end
         end
+
+        wait.(thread_vec)
+        put!(progress_channel, false)
     end
 
-    worker_querries = [Channel{Any}(1) for _ in 1:n_workers]
-    master_responses = [Channel{Any}(1) for _ in 1:n_workers]
+    belief = cat(belief...; dims=ndims(first(belief)))
+    value = reshape(reduce(vcat, value), 1, :)
+    policy = Flux.onehotbatch(reduce(vcat, policy), 1:length(actions(pomdp)))
 
-    function work_fun(i)
-        worker_net = function(x; kwargs...)
-            put!(worker_querries[i], x)
-            take!(master_responses[i])
-        end
+    return (; value, belief, policy, returns)
+end
 
-        b_vec = []
-        v_vec = Float32[]
-        p_vec = []
-        ret_vec = Float32[]
-
-        episodes = 0
-        while episodes < max(1,n_episodes/n_workers)
-            episode_data = gen_episode(pomdp, worker_net, params)
-            dst = (episode_data.b, episode_data.v, episode_data.p, episode_data.g)
-            src = (b_vec, v_vec, p_vec, ret_vec)
-            append!.(src, dst)
-
-            episodes += 1
-            put!(channel, 1)
-        end
-
-        return (; 
-            value   = reshape(v_vec,1,:), 
-            belief  = stack(input_representation, b_vec), 
-            policy  = stack(p_vec),
-            returns = ret_vec
-        )
-    end
-
+function master_function(net, async_loop, worker_querries, master_responses)
     master_net = net |> gpu
-
-    futures = [Threads.@spawn work_fun(i) for i in 1:n_workers]
-
-    while !all(istaskdone, futures)
+    while !istaskdone(async_loop) && !istaskfailed(async_loop)
         idxs = isready.(worker_querries)
         iszero(count(idxs)) && continue
 
@@ -139,59 +125,51 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
             put!.(master_responses[idxs], split_results)
         end
     end
-
-    data = fetch.(futures)
-
-    put!(channel, 0)
-    wait(async_loop)
-
-    k = (:value, :belief, :policy, :returns)
-    return NamedTuple{k}(reduce((args...)->cat(args...; dims=ndims(first(args))), (d[key] for d in data)) for key in k)
 end
 
-function gen_episode(pomdp, net, params::minBetaZeroParameters)
-    (; t_max, PFTDPWSolver_args) = params
+function work_fun(pomdp, params, querry_channel, response_channel)
+    (; t_max, GumbelSolver_args) = params
 
-    planner = solve(
-        PFTDPWSolver(;
-            getpolicyvalue = function(x)
-                out = net(input_representation(x))
-                return (; value=out.value[], policy=vec(out.policy))
-            end,
-            PFTDPWSolver_args...
-        ),
-        pomdp
-    )
+    function getpolicyvalue(b)
+        b_rep = input_representation(b)
+        put!(querry_channel, b_rep)
+        out = take!(response_channel)
+        return (; value=out.value[], policy=vec(out.policy))
+    end
 
-    bmdp = ParticleBeliefMDP(pomdp)
-    b = rand(initialstate(bmdp))
+    planner = solve(GumbelSolver(; getpolicyvalue, GumbelSolver_args...), pomdp)
+
+    up = BootstrapFilter(pomdp, 500)
+    b = initialize_belief(up, initialstate(pomdp))
+    s = rand(initialstate(pomdp))
 
     b_vec = typeof(b)[]
-    p_vec = Vector{Float32}[]
+    aid_vec = Int[]
     r_vec = Float32[]
-    p_nt = Float32[]
-    term_flag = false
     for _ in 1:t_max
-        a, a_info = action_info(planner, b)
+        a = action(planner, b)
         aid = actionindex(pomdp,a)
-        p = Flux.onehot(aid, 1:length(actions(pomdp)))
-        bp, r, info = @gen(:sp,:r,:info)(bmdp, b, aid)
-        push!.((b_vec,p_vec,r_vec,p_nt), (b,p,r,info))
-        b = bp
-        if ParticleFilterTrees.isterminalbelief(b)
-            term_flag = true
+        s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
+        push!.((b_vec,aid_vec,r_vec), (b,aid,r))
+        b = POMDPs.update(up, b, a, o)
+        if isterminal(pomdp, s)
             break
         end
     end
 
-    gamma = discount(bmdp)
+    gamma = discount(pomdp)
     for i in length(r_vec)-1:-1:1
-        r_vec[i] += p_nt[i] * gamma * r_vec[i+1]
+        r_vec[i] += gamma * r_vec[i+1]
     end
 
     episode_return = r_vec[1]
 
-    return (; b=b_vec, v=r_vec, p=p_vec, g=episode_return)
+    return (; 
+        belief=stack(input_representation, b_vec), 
+        value=r_vec, 
+        policy=aid_vec, 
+        returns=episode_return
+    )
 end
 
 function train!(net, data, params::minBetaZeroParameters)
@@ -204,9 +182,9 @@ function train!(net, data, params::minBetaZeroParameters)
     varVtrain = var(split_data[1].value_target)
     varVvalid = var(split_data[2].value_target)
 
-    split_data = split_data |> train_dev
-    train_data = Flux.DataLoader(split_data[1]; batchsize=min(batchsize, Flux.numobs(split_data[1])), shuffle=true, partial=false)
-    valid_data = Flux.DataLoader(split_data[2]; batchsize=min(4*batchsize, Flux.numobs(split_data[2])), shuffle=true, partial=false)
+    split_data = split_data
+    train_data = Flux.DataLoader(split_data[1]; batchsize=min(batchsize, Flux.numobs(split_data[1])), shuffle=true, partial=false) |> train_dev
+    valid_data = Flux.DataLoader(split_data[2]; batchsize=min(4*batchsize, Flux.numobs(split_data[2])), shuffle=true, partial=false) |> train_dev
 
     net = train_dev(net)
     opt = Flux.setup(Flux.Optimiser(Flux.Adam(lr), WeightDecay(lr*lambda)), net)
@@ -284,8 +262,6 @@ end
 
 function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
     (; n_iter, plot_training) = params
-
-    @info "Number of processes: $(nworkers())"
 
     info = Dict(
         :steps => Int[],

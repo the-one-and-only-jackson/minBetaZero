@@ -39,7 +39,7 @@ POMDPs.initialobs(m::LightDarkPOMDP, s) = observation(m, s)
 POMDPs.observation(p::LightDarkPOMDP, sp::LightDarkState) = Normal(sp.y, p.sigma(sp.y))
 
 function POMDPs.transition(p::LightDarkPOMDP, s::LightDarkState, a::Int)
-    @assert a ∈ actions(p)
+    @assert a ∈ actions(p) "Action $a"
     status = (a == 0) ? -1 : s.status
     a = clamp(a, -1, 1)
     y = clamp(s.y + a*p.step_size, -p.max_y, p.max_y)
