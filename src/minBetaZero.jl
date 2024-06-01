@@ -60,7 +60,59 @@ end
     n_warmup    = 500
 end
 
-function gen_data(pomdp, net, params::minBetaZeroParameters)
+mutable struct DataBuffer{A,B,C}
+    const network_input::A
+    const value_target::B
+    const policy_target::C
+    const capacity::Int
+    length::Int
+    idx::Int
+end
+
+function DataBuffer(input_dims::Tuple{Vararg{Int}}, na::Int, capacity::Int)
+    network_input = zeros(Float32, input_dims..., capacity)
+    value_target  = zeros(Float32, 1, capacity)
+    policy_target = zeros(Float32, na, capacity)
+    return DataBuffer(network_input, value_target, policy_target, capacity, 0, 1)
+end
+
+function set_buffer!(b::DataBuffer; network_input, value_target, policy_target)
+    L = length(value_target)
+
+    @assert size(network_input)[end] == L || (L==1 && ndims(network_input) == ndims(b.network_input) - 1)
+    @assert size(value_target )[end] == L || (L==1 && ndims(value_target ) == ndims(b.value_target ) - 1) "value $(size(value_target))"
+    @assert size(policy_target)[end] == L || (L==1 && ndims(policy_target) == ndims(b.policy_target) - 1)
+
+    if b.capacity - b.idx + 1 >= L
+        dst_idxs = b.idx .+ (0:L-1)
+        copyto!(select_last_dim(b.network_input, dst_idxs), network_input)
+        copyto!(select_last_dim(b.value_target, dst_idxs), value_target)
+        copyto!(select_last_dim(b.policy_target, dst_idxs), policy_target)
+    else
+        L1 = b.capacity - b.idx + 1
+        dst_idxs = b.idx:b.capacity
+        src_idxs = 1:L1
+        copyto!(select_last_dim(b.network_input, dst_idxs), select_last_dim(network_input, src_idxs))
+        copyto!(select_last_dim(b.value_target, dst_idxs), select_last_dim(value_target, src_idxs))
+        copyto!(select_last_dim(b.policy_target, dst_idxs), select_last_dim(policy_target, src_idxs))
+
+        L2 = L - L1
+        dst_idxs = 1:L2
+        src_idxs = L1+1:L
+        copyto!(select_last_dim(b.network_input, dst_idxs), select_last_dim(network_input, src_idxs))
+        copyto!(select_last_dim(b.value_target, dst_idxs), select_last_dim(value_target, src_idxs))
+        copyto!(select_last_dim(b.policy_target, dst_idxs), select_last_dim(policy_target, src_idxs))
+    end
+    
+    b.idx = mod1(b.idx + L, b.capacity)
+    b.length = min(b.length + L, b.capacity)
+
+    return nothing
+end
+
+@inline select_last_dim(arr, idxs) = selectdim(arr, ndims(arr), idxs)
+
+function gen_data(pomdp, net, params::minBetaZeroParameters, buffer::DataBuffer)
     (; n_episodes) = params
 
     belief = Vector{Array{Float32}}(undef, n_episodes)
@@ -97,11 +149,15 @@ function gen_data(pomdp, net, params::minBetaZeroParameters)
         put!(progress_channel, false)
     end
 
-    belief = cat(belief...; dims=ndims(first(belief)))
-    value = reshape(reduce(vcat, value), 1, :)
-    policy = Flux.onehotbatch(reduce(vcat, policy), 1:length(actions(pomdp)))
+    for (network_input, value_target, ai) in zip(belief, value, policy)
+        policy_target = Flux.onehotbatch(ai, 1:length(actions(pomdp)))
+        value_target = reshape(value_target,1,:)
+        set_buffer!(buffer; network_input, value_target, policy_target)
+    end
 
-    return (; value, belief, policy, returns)
+    steps = sum(length(v) for v in value)
+
+    return returns, steps
 end
 
 function master_function(net, async_loop, worker_querries, master_responses)
@@ -175,7 +231,7 @@ end
 function train!(net, data, params::minBetaZeroParameters)
     (; train_frac, batchsize, lr, lambda, n_epochs, train_dev, early_stop, n_warmup) = params
 
-    split_data = Flux.splitobs(data, at=train_frac) 
+    split_data = Flux.splitobs(data, at=train_frac, shuffle=true) 
 
     Etrain = mean(-sum(x->iszero(x) ? x : x*log(x), split_data[1].policy_target; dims=1))
     Evalid = mean(-sum(x->iszero(x) ? x : x*log(x), split_data[2].policy_target; dims=1))
@@ -185,6 +241,9 @@ function train!(net, data, params::minBetaZeroParameters)
     split_data = split_data
     train_data = Flux.DataLoader(split_data[1]; batchsize=min(batchsize, Flux.numobs(split_data[1])), shuffle=true, partial=false) |> train_dev
     valid_data = Flux.DataLoader(split_data[2]; batchsize=min(4*batchsize, Flux.numobs(split_data[2])), shuffle=true, partial=false) |> train_dev
+
+    @info "Training on $(Flux.numobs(split_data[1])) samples"
+    @info "Testing on  $(Flux.numobs(split_data[2])) samples"
 
     net = train_dev(net)
     opt = Flux.setup(Flux.Optimiser(Flux.Adam(lr), WeightDecay(lr*lambda)), net)
@@ -199,6 +258,9 @@ function train!(net, data, params::minBetaZeroParameters)
 
     function lossfun(net, x; value_target, policy_target, info, policy_entropy, value_var)
         losses = getloss(net, x; value_target, policy_target)
+        @assert all(isfinite, losses.policy_loss)
+        @assert all(isfinite, losses.value_loss)
+        @assert all(isfinite, losses.value_mse)
         Flux.Zygote.ignore_derivatives() do 
             push!(info[:policy_loss], losses.policy_loss                 )
             push!(info[:policy_KL]  , losses.policy_loss - policy_entropy)
@@ -215,8 +277,13 @@ function train!(net, data, params::minBetaZeroParameters)
         Flux.trainmode!(net)
         for (; x, value_target, policy_target) in train_data
             grad_steps += 1
-            lr_scale = min(grad_steps / n_warmup, 1 - (grad_steps - n_warmup)/(n_epochs*length(train_data) - n_warmup))
-            Flux.adjust!(opt; eta=lr_scale*lr, lambda=lr_scale*lr*lambda)    
+
+            if n_epochs*length(train_data)+1 > n_warmup > 0
+                ramp = grad_steps / n_warmup
+                decay = 1 - (grad_steps - n_warmup) / (n_epochs*length(train_data) - n_warmup)
+                lr_scale = min(ramp, decay)
+                Flux.adjust!(opt; eta=lr_scale*lr, lambda=lr_scale*lr*lambda)
+            end
     
             grads = Flux.gradient(net) do net
                 lossfun(net, x; value_target, policy_target, info=train_info, policy_entropy=Etrain, value_var=varVtrain)
@@ -237,7 +304,7 @@ function train!(net, data, params::minBetaZeroParameters)
             checkpoint_pol = epoch_pol   
             last_checkpoint = epoch  
         end
-        if epoch - last_checkpoint > early_stop
+        if epoch - last_checkpoint >= early_stop
             break
         end
     end
@@ -270,16 +337,23 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         :returns_error => Float64[]
     )
 
+    input_dims = (1,500)
+    na = 3
+    buff_cap = 100_000
+    buffer = DataBuffer(input_dims, na, buff_cap)
+
     for itr in 1:n_iter+1
         @info itr <= n_iter ? "Gathering Data - Iteration: $itr" : "Gathering Data - Final Evaluation"
-        data = gen_data(pomdp, net, params)
+        returns, steps = gen_data(pomdp, net, params, buffer)
         
-        steps = length(data.value)
-        episodes = length(data.returns)
-        returns_mean = mean(data.returns)
-        returns_error = std(data.returns)/sqrt(length(data.returns))
+        episodes = length(returns)
+        returns_mean = mean(returns)
+        returns_error = std(returns)/sqrt(length(returns))
 
-        push!.((info[:steps], info[:episodes], info[:returns], info[:returns_error]), (steps, episodes, returns_mean, returns_error))
+        push!.(
+            (info[:steps], info[:episodes], info[:returns], info[:returns_error]), 
+            (steps, episodes, returns_mean, returns_error)
+        )
 
         _rm = round(returns_mean; sigdigits=1+Base.hidigit(returns_mean,10)-Base.hidigit(returns_error,10))
         _re = round(returns_error; sigdigits=1)
@@ -290,7 +364,14 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         itr == n_iter+1 && break
 
         @info "Training"
-        net, train_info = train!(net, (; x=data.belief, value_target=data.value, policy_target=data.policy), params)
+
+        train_data = (; 
+            x = select_last_dim(buffer.network_input, 1:buffer.length),
+            value_target = select_last_dim(buffer.value_target, 1:buffer.length),
+            policy_target = select_last_dim(buffer.policy_target, 1:buffer.length),
+        )
+
+        net, train_info = train!(net, train_data, params)
 
         if plot_training
             pv = plot(train_info[:train_R]; c=1, label="train", ylabel="FVU", title="Training Information")
