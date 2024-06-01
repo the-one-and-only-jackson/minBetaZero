@@ -4,15 +4,10 @@
 - `n_particles::Int = 100` - Number of particles representing belief
 - `k_o::Float64 = 10.0` - Initial observation widening parameter
 - `alpha_o::Float64 = 0.0` - Observation progressive widening parameter
-- `k_a::Float64 = 5.0` - Initial action widening parameter
-- `alpha_a::Float64 = 0.0` - Action progressive widening parameter
-- `criterion = MaxPoly()` - action selection criterion
 - `tree_queries::Int = 1_000` - Maximum number of tree search iterations
 - `max_time::Float64 = Inf` - Maximum tree search time (in seconds)
 - `rng = Random.default_rng()` - Random number generator
-- `value_estimator = FastRandomSolver()` - Belief node value estimator
 - `check_repeat_obs::Bool = true` - Check that repeat observations do not overwrite beliefs (added dictionary overhead)
-- `enable_action_pw::Bool = false` - Alias for `alpha_a = 0.0`
 - `beliefcache_size::Int = 1_000` - Number of particle/weight vectors to cache offline
 - `treecache_size::Int = 1_000` - Number of belief/action nodes to preallocate in tree (reduces `Base._growend!` calls)
 - `default_action = RandomDefaultAction()` - Action to take if root has no children
@@ -157,11 +152,28 @@ function select_root_action(planner::GumbelPlanner, Ntarget)
     return nothing
 end
 
+function get_q_extrema(tree::GuidedTree, b_idx::Int)
+    min_q = max_q = Float64(tree.b_V[b_idx])
+    for (ai, ba_idx) in tree.b_children[b_idx]
+        q = tree.Qha[ba_idx]
+        if q < min_q
+            min_q = q
+        elseif q > max_q
+            max_q = q
+        end
+    end
+    return min_q, max_q
+end
+
 function reduce_root_actions(planner::GumbelPlanner, Ntarget::Int, g_P)
     (; tree, sol, pomdp, live_actions) = planner
     (; cscale, cvisit) = sol
 
-    sigma = cscale * (cvisit + Ntarget)
+    min_q, max_q = get_q_extrema(tree, 1)
+    dq = max_q - min_q
+
+    sigma = cscale * (cvisit + Ntarget) / dq
+
     for i in 1:floor(Int, count(live_actions)/2)
         local aidx_min::Int
         valmin = Inf
@@ -185,9 +197,14 @@ function mcts_main(planner::GumbelPlanner, b_idx::Int, d::Int, Ntarget::Int)
     sigma = cscale * (cvisit + Ntarget)
     v = tree.b_V[b_idx]
 
-    new_logits = tree.b_P[b_idx] .+ sigma * v # add a cache here!!!
+    min_q, max_q = get_q_extrema(tree, b_idx)
+    dq = max_q - min_q
+
+    sigma_v_norm = sigma * v / dq
+
+    new_logits = tree.b_P[b_idx] .+ sigma_v_norm # add a cache here!!!
     for (ai, ba_idx) in tree.b_children[b_idx]
-        new_logits[ai] += sigma * (tree.Qha[ba_idx] - v)
+        new_logits[ai] += sigma * tree.Qha[ba_idx] / dq - sigma_v_norm
     end
     pi_completed = softmax!(new_logits)
 
