@@ -112,7 +112,7 @@ end
 
 function initialize_root!(planner, b)
     (; tree, cache, sol, pomdp, live_actions) = planner
-    (; rng, n_particles, tree_queries, getpolicyvalue, m_acts_init, stochastic_root) = sol
+    (; rng, n_particles, getpolicyvalue, m_acts_init, stochastic_root) = sol
 
     s,w = gen_empty_belief(cache, n_particles)
     particle_b = initialize_belief!(rng, s, w, pomdp, b)
@@ -140,7 +140,7 @@ function initialize_root!(planner, b)
 end
 
 function select_root_action(planner::GumbelPlanner, Ntarget)
-    (; tree, pomdp, ordered_actions, live_actions) = planner
+    (; tree, ordered_actions, live_actions) = planner
 
     for (ai, ba_idx) in tree.b_children[1]
         if live_actions[ai] && tree.Nha[ba_idx] < Ntarget
@@ -152,24 +152,32 @@ function select_root_action(planner::GumbelPlanner, Ntarget)
     return nothing
 end
 
-function get_q_extrema(tree::GuidedTree, b_idx::Int)
-    min_q = max_q = Float64(tree.b_V[b_idx])
-    for (ai, ba_idx) in tree.b_children[b_idx]
+function get_q_extrema(tree::GuidedTree, b_idx::Int, na::Int)
+    if length(tree.b_children[b_idx]) == na
+        min_q = Inf
+        max_q = -Inf
+    else
+        min_q = max_q = Float64(tree.b_V[b_idx])
+    end
+
+    for (_, ba_idx) in tree.b_children[b_idx]
         q = tree.Qha[ba_idx]
+
         if q < min_q
             min_q = q
         elseif q > max_q
             max_q = q
         end
     end
+
     return min_q, max_q
 end
 
 function reduce_root_actions(planner::GumbelPlanner, Ntarget::Int, g_P)
-    (; tree, sol, pomdp, live_actions) = planner
+    (; tree, sol, live_actions) = planner
     (; cscale, cvisit) = sol
 
-    min_q, max_q = get_q_extrema(tree, 1)
+    min_q, max_q = get_q_extrema(tree, 1, length(live_actions))
     dq = max_q - min_q
 
     sigma = cscale * (cvisit + Ntarget) / dq
@@ -191,13 +199,13 @@ function reduce_root_actions(planner::GumbelPlanner, Ntarget::Int, g_P)
 end
 
 function mcts_main(planner::GumbelPlanner, b_idx::Int, d::Int, Ntarget::Int)
-    (; tree, pomdp, sol, ordered_actions) = planner
+    (; tree, sol, ordered_actions) = planner
     (; cscale, cvisit) = sol
 
     sigma = cscale * (cvisit + Ntarget)
     v = tree.b_V[b_idx]
 
-    min_q, max_q = get_q_extrema(tree, b_idx)
+    min_q, max_q = get_q_extrema(tree, b_idx, length(ordered_actions))
     dq = max_q - min_q
 
     sigma_v_norm = sigma * v / dq

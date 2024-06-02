@@ -18,55 +18,62 @@ end
 
 mean_std_layer(x) = dropdims(cat(mean(x; dims=2), std(x; dims=2); dims=1); dims=2)
 
-params = minBetaZeroParameters(
-    GumbelSolver_args = (;
-        max_depth           = 10,
-        n_particles         = 100,
-        tree_queries        = 100,
-        max_time            = Inf,
-        k_o                 = 20.,
-        alpha_o             = 0.,
-        check_repeat_obs    = true,
-        resample            = true,
-        treecache_size      = 1_000, 
-        beliefcache_size    = 1_000,
-        m_acts_init         = 3,
-        cscale              = 1.,
-        cvisit              = 50.
-    ),
-    t_max           = 50,
-    n_episodes      = 500,
-    n_iter          = 10,
-    train_frac      = 0.7,
-    batchsize       = 256,
-    lr              = 3e-4,
-    lambda          = 0.0,
-    n_epochs        = 500,
-    plot_training   = true,
-    train_dev       = gpu,
-    early_stop      = 50,
-    n_warmup        = 0
-)
+for buff_cap in[200_000, 100_000, 50_000, 25_000]
+    params = minBetaZeroParameters(
+        GumbelSolver_args = (;
+            max_depth           = 10,
+            n_particles         = 100,
+            tree_queries        = 100,
+            max_time            = Inf,
+            k_o                 = 20.,
+            alpha_o             = 0.,
+            check_repeat_obs    = true,
+            resample            = true,
+            treecache_size      = 1_000, 
+            beliefcache_size    = 1_000,
+            m_acts_init         = 3,
+            cscale              = 1.0,
+            cvisit              = 50.
+        ),
+        t_max           = 50,
+        n_episodes      = 100,
+        n_iter          = 50,
+        train_frac      = 0.7,
+        batchsize       = 256,
+        lr              = 3e-4,
+        lambda          = 0.0,
+        n_epochs        = 500,
+        plot_training   = true,
+        train_device    = gpu,
+        inference_device = gpu,
+        early_stop      = 1,
+        n_warmup        = 0,
+        buff_cap = buff_cap # tmax * n_episodes * min_train_intensity
+    )
 
-nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
-    action_size         = 3,
-    input_size          = (1,),
-    critic_loss         = Flux.Losses.mse, # Flux.Losses.logitcrossentropy,
-    critic_categories   = collect(-100:100),
-    p_dropout           = 0.0,
-    neurons             = 256,
-    hidden_layers       = 2,
-    shared_net          = mean_std_layer,
-    shared_out_size     = (2,) # must manually set... fix at a later date...        
-)
+    nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
+        action_size         = 3,
+        input_size          = (1,),
+        critic_loss         = Flux.Losses.logitcrossentropy,
+        critic_categories   = collect(-100:10:100),
+        p_dropout           = 0.1,
+        neurons             = 64,
+        hidden_layers       = 2,
+        shared_net          = mean_std_layer,
+        shared_out_size     = (2,) # must manually set... fix at a later date...        
+    )
 
-@time net, info = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params));
+    @time net, info = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params));
 
-plot(
-    plot(info[:steps], info[:returns]; label=false, xlabel="Steps", title="Mean Episodic Return"),
-    plot(info[:episodes], info[:returns]; label=false, xlabel="Episodes");
-    layout=(2,1)
-) |> display
+    plot(
+        plot(info[:steps], info[:returns]; label=false, xlabel="Steps", title="Mean Episodic Return"),
+        plot(info[:episodes], info[:returns]; label=false, xlabel="Episodes");
+        layout=(2,1)
+    ) |> display
+
+    savefig("cap_$(buff_cap).png")
+end
+    
 
 for cscale in [0.1, 1., 10.]
     params = minBetaZeroParameters(
