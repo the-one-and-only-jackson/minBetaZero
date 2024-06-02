@@ -43,17 +43,13 @@ include("tools.jl")
     t_max       = 100
     n_episodes  = 500
     n_iter      = 20
-    train_frac  = 0.8
     batchsize   = 128
     lr          = 3e-4
     lambda      = 0.0
-    n_epochs    = 50
     plot_training = false
     train_device  = cpu
     inference_device = cpu
-    early_stop  = 10
-    n_warmup    = 500
-    input_dims = (1,500)
+    input_dims = (1,)
     na = 3
     buff_cap = 10_000
     n_particles = 500
@@ -70,7 +66,7 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         :training => Dict[]
     )
 
-    buffer = DataBuffer(input_dims, na, buff_cap)
+    buffer = DataBuffer((input_dims..., n_particles), na, buff_cap)
 
     for itr in 1:n_iter+1
         iter_timer = time()
@@ -236,7 +232,7 @@ function work_fun(pomdp, params, querry_channel, response_channel)
 end
 
 function train!(net, data, params::minBetaZeroParameters)
-    (; train_frac, batchsize, lr, lambda, n_epochs, train_device, early_stop, n_warmup, plot_training) = params
+    (; batchsize, lr, lambda, train_device, plot_training) = params
 
     Etrain = mean(-sum(x->iszero(x) ? x : x*log(x), data.policy_target; dims=1))
     varVtrain = var(data.value_target)
