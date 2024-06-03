@@ -1,4 +1,12 @@
 using Distributed
+
+# addprocs(
+#     [("jawa5671@omak.colorado.edu", 1)];
+#     dir="/home/jawa5671/",
+#     exename="/home/jawa5671/.juliaup/bin/julia",
+#     sshflags=`-vvv`
+# )
+
 addprocs(20)
 
 @everywhere begin
@@ -40,15 +48,15 @@ params = minBetaZeroParameters(
         cvisit              = 50.
     ),
     t_max           = 50,
-    n_episodes      = 100,
-    n_iter          = 100,
+    n_episodes      = 40,
+    n_iter          = 500,
     batchsize       = 128,
     lr              = 3e-4,
     lambda          = 0.0,
     plot_training   = false,
     train_device    = gpu,
     inference_device = gpu,
-    buff_cap = 25*100*4
+    buff_cap = 40_000
 )
 
 nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
@@ -63,16 +71,31 @@ nn_params = NetworkParameters( # These are POMDP specific! not general parameter
     shared_out_size     = (2,) # must manually set... fix at a later date...        
 )
 
-@time net, info = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params));
+# do multiple epochs and checkpointing
 
-plot(
-    plot(info[:steps], info[:returns]; label=false, xlabel="Steps", title="Mean Episodic Return"),
-    plot(info[:episodes], info[:returns]; label=false, xlabel="Episodes");
-    layout=(2,1)
-) |> display
+results = []
+for _ in 1:5
+    @time net, info = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params));
 
+    plot(
+        plot(info[:steps], info[:returns]; label=false, xlabel="Steps", title="Mean Episodic Return"),
+        plot(info[:episodes], info[:returns]; label=false, xlabel="Episodes");
+        layout=(2,1)
+    ) |> display
+
+    push!(results, (net, info))
+end
+
+p = plot(xlabel="Episodes", title="Mean Episodic Return - $(params.buff_cap) Buffer - $(params.n_episodes) Episodes")
+for (_, info) in results
+    plot!(p, info[:episodes], info[:returns]; label=false)
+end
+p
+
+results
     
     
+
 master_net = deepcopy(net)
 
 

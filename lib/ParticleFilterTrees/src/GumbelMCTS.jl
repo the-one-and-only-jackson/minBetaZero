@@ -284,8 +284,8 @@ function mcts_main(planner::GumbelPlanner, b_idx::Int, a, ba_idx::Int, d::Int)
 end
 
 function insert_new_belief!(planner, b, ba_idx, a, o, p_idx, sample_sp, sample_r)
-    (; tree, pomdp, sol, cache, ordered_actions) = planner
-    (; max_depth, rng, check_repeat_obs, resample, getpolicyvalue) = sol
+    (; tree, pomdp, sol, cache) = planner
+    (; rng, check_repeat_obs, resample, getpolicyvalue) = sol
 
     bp_particles, bp_weights = gen_empty_belief(cache, n_particles(b))
     bp, r, nt_prob = GenBelief(
