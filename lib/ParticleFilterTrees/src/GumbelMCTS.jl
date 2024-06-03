@@ -79,7 +79,7 @@ function POMDPTools.action_info(planner::GumbelPlanner, b)
             ktarget *= 2
             Ntarget += floor(Int, ktarget * dN)
 
-            reduce_root_actions(planner, Ntarget, g_P)
+            reduce_root_actions(planner, g_P)
             @assert count(live_actions) > 0
             count(live_actions) == 1 && break
 
@@ -87,7 +87,7 @@ function POMDPTools.action_info(planner::GumbelPlanner, b)
         end
         a, ba_idx = sra
 
-        mcts_main(planner, 1, a, ba_idx, 0, Ntarget)
+        mcts_main(planner, 1, a, ba_idx, 0)
 
         iter += 1
     end
@@ -142,6 +142,9 @@ end
 function select_root_action(planner::GumbelPlanner, Ntarget)
     (; tree, ordered_actions, live_actions) = planner
 
+    # select action with minimum Nha - constrained by Ntarget and live_actions
+    # right now this only works if halving ends within iteration bounds
+
     for (ai, ba_idx) in tree.b_children[1]
         if live_actions[ai] && tree.Nha[ba_idx] < Ntarget
             a = ordered_actions[ai]
@@ -152,7 +155,7 @@ function select_root_action(planner::GumbelPlanner, Ntarget)
     return nothing
 end
 
-function get_q_extrema(tree::GuidedTree, b_idx::Int, na::Int)
+function get_dq_extrema(tree::GuidedTree, b_idx::Int, na::Int)
     if length(tree.b_children[b_idx]) == na
         min_q = Inf
         max_q = -Inf
@@ -170,17 +173,25 @@ function get_q_extrema(tree::GuidedTree, b_idx::Int, na::Int)
         end
     end
 
-    return min_q, max_q
+    dq  = max_q - min_q
+    dq = dq < 1e-6 ? one(dq) : dq
+
+    return dq
 end
 
-function reduce_root_actions(planner::GumbelPlanner, Ntarget::Int, g_P)
+function reduce_root_actions(planner::GumbelPlanner, g_P)
     (; tree, sol, live_actions) = planner
     (; cscale, cvisit) = sol
 
-    min_q, max_q = get_q_extrema(tree, 1, length(live_actions))
-    dq = max_q - min_q
+    dq = get_dq_extrema(tree, 1, length(live_actions))
+    # dq = 1.0
 
-    sigma = cscale * (cvisit + Ntarget) / dq
+    Nmax = 0
+    for (_, ba_idx) in tree.b_children[1]
+        Nmax = max(Nmax, tree.Nha[ba_idx])
+    end
+
+    sigma = cscale * (cvisit + Nmax) / dq
 
     for i in 1:floor(Int, count(live_actions)/2)
         local aidx_min::Int
@@ -198,15 +209,20 @@ function reduce_root_actions(planner::GumbelPlanner, Ntarget::Int, g_P)
     nothing
 end
 
-function mcts_main(planner::GumbelPlanner, b_idx::Int, d::Int, Ntarget::Int)
+function mcts_main(planner::GumbelPlanner, b_idx::Int, d::Int)
     (; tree, sol, ordered_actions) = planner
     (; cscale, cvisit) = sol
 
-    sigma = cscale * (cvisit + Ntarget)
+    Nmax = 0
+    for (_, ba_idx) in tree.b_children[b_idx]
+        Nmax = max(Nmax, tree.Nha[ba_idx])
+    end
+
+    sigma = cscale * (cvisit + Nmax)
     v = tree.b_V[b_idx]
 
-    min_q, max_q = get_q_extrema(tree, b_idx, length(ordered_actions))
-    dq = max_q - min_q
+    dq = get_dq_extrema(tree, b_idx, length(ordered_actions))
+    # dq = 1.0
 
     sigma_v_norm = sigma * v / dq
 
@@ -225,10 +241,10 @@ function mcts_main(planner::GumbelPlanner, b_idx::Int, d::Int, Ntarget::Int)
     opt_a = ordered_actions[opt_ai]
     opt_ba_idx = insert_action!(tree, b_idx, opt_ai)
 
-    mcts_main(planner, b_idx, opt_a, opt_ba_idx, d, Ntarget)
+    mcts_main(planner, b_idx, opt_a, opt_ba_idx, d)
 end
 
-function mcts_main(planner::GumbelPlanner, b_idx::Int, a, ba_idx::Int, d::Int, Ntarget::Int)
+function mcts_main(planner::GumbelPlanner, b_idx::Int, a, ba_idx::Int, d::Int)
     (; tree, pomdp, sol) = planner
     (; max_depth, k_o, alpha_o, rng, check_repeat_obs) = sol
 
@@ -246,14 +262,14 @@ function mcts_main(planner::GumbelPlanner, b_idx::Int, a, ba_idx::Int, d::Int, N
         if check_repeat_obs && haskey(tree.bao_children, (ba_idx, o))
             bp_idx = tree.bao_children[(ba_idx,o)]
             push!(tree.ba_children[ba_idx], bp_idx)
-            Vp = mcts_main(planner, bp_idx, d+1, Ntarget)
+            Vp = mcts_main(planner, bp_idx, d+1)
         else
             bp_idx, Vp = insert_new_belief!(planner, b, ba_idx, a, o, p_idx, sample_sp, sample_r)
         end
     else
         bp_idx = rand(rng, tree.ba_children[ba_idx])
         @assert !isempty(tree.ba_children[ba_idx]) "depth = $d"
-        Vp = mcts_main(planner, bp_idx, d+1, Ntarget)
+        Vp = mcts_main(planner, bp_idx, d+1)
     end
 
     total = tree.b_rewards[bp_idx] + discount(pomdp) * tree.b_ntprob[bp_idx] * Vp
