@@ -8,8 +8,9 @@ using Pkg
 using ProgressMeter, Plots
 using Distributed
 
-# include("../lib/ParticleFilterTrees/src/ParticleFilterTrees.jl")
-using ParticleFilterTrees
+include("ParticleFilterTrees/ParticleFilterTrees.jl")
+using .ParticleFilterTrees
+export PFTBelief, GuidedTree, GumbelSolver, GumbelPlanner
 
 include("beliefmdp.jl")
 export ParticleBeliefMDP
@@ -96,7 +97,7 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         iter_timer = time()
 
         @info itr <= n_iter ? "Gathering Data - Iteration: $itr" : "Gathering Data - Final Evaluation"
-        returns, steps = gen_data_distributed(pomdp, net, params, buffer; rand_policy = false)
+        returns, steps = gen_data_distributed(pomdp, net, params, buffer)
                 
         episodes = length(returns)
         returns_mean = mean(returns)
@@ -122,19 +123,16 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         # This is so wez get the stats after the n_iter network update
         itr == n_iter+1 && break
 
-        if buffer.length == buffer.capacity && buffer.length >= warmup_steps
-            println("in loop")
-            idxs = randperm(buffer.length)[1:steps*train_intensity]
+        if buffer.length >= warmup_steps
+            idxs = rand(1:buffer.length, steps*train_intensity)
             train_data = (; 
-                x = select_last_dim(buffer.network_input, idxs),
-                value_target = select_last_dim(buffer.value_target, idxs),
-                policy_target = select_last_dim(buffer.policy_target, idxs),
+                x             = select_last_dim(buffer.network_input, idxs),
+                value_target  = select_last_dim(buffer.value_target , idxs),
+                policy_target = select_last_dim(buffer.policy_target, idxs)
             )
-
             net, train_info = train!(net, train_data, params)
             push!(info[:training], train_info)
         end
-
 
         iter_time = ceil(Int, time()-iter_timer)
         @info "Iteration time: $iter_time seconds"
@@ -147,41 +145,55 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
     return net, info
 end
 
-function gen_data_distributed(pomdp, net, params::minBetaZeroParameters, buffer::DataBuffer; rand_policy=false)
+function gen_data_distributed(pomdp::POMDP, net, params::minBetaZeroParameters, buffer::DataBuffer)
     (; n_episodes, GumbelSolver_args) = params
     
-    progress = Progress(n_episodes)
-    steps = 0
-    ret_vec = Float32[]
-
-    data = pmap(1:nworkers()) do i
-        function getpolicyvalue(b)
-            b_rep = input_representation(b)
-            out = net(b_rep; logits=true)
-            return (; value=out.value[], policy=vec(out.policy))
-        end
-        planner = solve(GumbelSolver(; getpolicyvalue, GumbelSolver_args...), pomdp)
-
-        local_data = []
-        for _ in 1:floor(n_episodes/nworkers())
-            data = work_fun(pomdp, planner, params)
-            push!(local_data, data)
-        end
-
-        return local_data
-    end
-
+    progress = Progress(ceil(Int, n_episodes/nworkers())*nworkers())
+    storage_channel = RemoteChannel(()->Channel{Any}())
     ret_vec = Float32[]
     steps = 0
-    for local_data in data
-        for d in local_data
-            set_buffer!(buffer; network_input=d.belief, value_target=d.value, policy_target=d.policy)
-            push!(ret_vec, d.returns)
-            steps += length(d.value)
-            next!(progress)
-        end
-    end
 
+    @sync begin
+        Threads.@spawn try
+            while true
+                data = take!(storage_channel)
+                steps += length(data.value_target)
+                set_buffer!(
+                    buffer; 
+                    network_input = data.network_input, 
+                    value_target  = data.value_target, 
+                    policy_target = data.policy_target
+                )
+                push!(ret_vec, data.returns)
+                next!(progress)     
+            end
+        catch e
+            if isopen(storage_channel)
+                close(storage_channel)
+                display(e)
+                rethrow(e)
+            end        
+        end
+
+        pmap(1:nworkers()) do i
+            function getpolicyvalue(b)
+                b_rep = input_representation(b)
+                out = net(b_rep; logits=true)
+                return (; value=out.value[], policy=vec(out.policy))
+            end
+
+            planner = solve(GumbelSolver(; getpolicyvalue, GumbelSolver_args...), pomdp)
+
+            for _ in 1:ceil(Int, n_episodes/nworkers())
+                data = work_fun(pomdp, planner, params)
+                put!(storage_channel, data)
+            end
+
+            return nothing
+        end
+
+        close(storage_channel)
+    end
 
     return ret_vec, steps
 end
@@ -323,10 +335,10 @@ function work_fun(pomdp, planner, params)
     output_reward = use_belief_reward ? belief_reward : state_reward
 
     data = (; 
-        belief = stack(input_representation, b_vec), 
-        value = reshape(output_reward, 1, :), 
-        policy = Flux.onehotbatch(aid_vec, 1:length(actions(pomdp))), 
-        returns = state_reward[1]
+        network_input = stack(input_representation, b_vec), 
+        value_target  = reshape(output_reward, 1, :), 
+        policy_target = Flux.onehotbatch(aid_vec, 1:length(actions(pomdp))), 
+        returns       = state_reward[1]
     )
 
     return data
@@ -357,7 +369,12 @@ function train!(net, data, params::minBetaZeroParameters)
     net = train_device(net)
     opt = Flux.setup(Flux.Optimiser(Flux.Adam(lr), WeightDecay(lr*lambda)), net)
 
-    info = Dict(:policy_loss=>Float32[], :policy_KL=>Float32[], :value_loss=>Float32[], :value_FVU=>Float32[])
+    info = Dict(
+        :policy_loss => Float32[], 
+        :policy_KL   => Float32[], 
+        :value_loss  => Float32[], 
+        :value_FVU   => Float32[]
+    )
     
     Flux.trainmode!(net) 
     @showprogress for (; x, value_target, policy_target) in train_data

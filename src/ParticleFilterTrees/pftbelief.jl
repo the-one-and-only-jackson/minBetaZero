@@ -97,8 +97,22 @@ function initialize_belief!(
     fill!(w, inv(length(s))) # all particles equal weight
 
     perm = randperm(rng, n_particles(b))
+    j = 1
     for i in eachindex(s)
-        s[i] = particle(b, perm[i])
+        s[i] = particle(b, perm[j])
+        j = mod1(j+1, n_particles(b))
+
+        k = 1
+        while isterminal(pomdp, s[i])
+            s[i] = particle(b, perm[j])
+            j = mod1(j+1, n_particles(b))
+            k += 1
+            if k > n_particles(b)
+                @warn "All particles are terminal" maxlog=1
+                rand!(rng, s, b)
+                return PFTBelief(s, w, 1.0)
+            end
+        end
     end
 
     return PFTBelief(s, w, 1.0)

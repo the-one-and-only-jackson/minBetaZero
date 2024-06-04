@@ -7,11 +7,10 @@ using Distributed
 #     sshflags=`-vvv`
 # )
 
-addprocs(20)
+addprocs(10)
 
 @everywhere begin
     using minBetaZero
-    using ParticleFilterTrees
     using POMDPs
     using POMDPTools
     using ParticleFilters
@@ -48,24 +47,24 @@ params = minBetaZeroParameters(
         cvisit              = 50.
     ),
     t_max           = 50,
-    n_episodes      = 20,
-    n_iter          = 1000,
+    n_episodes      = 50,
+    n_iter          = 200,
     batchsize       = 128,
     lr              = 3e-4,
     lambda          = 1e-3,
     plot_training   = false,
     train_device    = gpu,
     inference_device = gpu,
-    buff_cap = 25_000,
+    buff_cap = 20_000,
     train_intensity = 16,
-    warmup_steps = 9_000
+    warmup_steps = 4_000
 )
 
 function f(buff_cap, train_intensity, warmup_steps)
     sum(1 - ((i-1)/i)^train_intensity for i in warmup_steps:buff_cap)
 end
 
-f(25_000, 16, 9_000)
+f(20_000, 8, 4_000)
 
 nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
     action_size         = 3,
