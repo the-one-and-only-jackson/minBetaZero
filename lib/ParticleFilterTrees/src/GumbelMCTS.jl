@@ -40,22 +40,45 @@ struct GumbelPlanner{SOL<:GumbelSolver, M<:POMDP, TREE<:GuidedTree, S, OA} <: Po
     cache::BeliefCache{S}
     ordered_actions::OA
     live_actions::BitVector
+    q_extrema::Vector{Float64}
+    noisy_logits::Vector{Float64}
+end
+
+function get_dq(planner::GumbelPlanner; eps=1e-6)
+    dq = planner.q_extrema[2] - planner.q_extrema[1]
+    @assert isfinite(dq)
+    return dq < eps ? one(dq) : dq
+end
+
+function update_dq!(planner::GumbelPlanner, q)
+    if q < planner.q_extrema[1]
+        planner.q_extrema[1] = q
+    elseif q > planner.q_extrema[2]
+        planner.q_extrema[2] = q
+    end
+    return nothing
 end
 
 function POMDPs.solve(sol::GumbelSolver, pomdp::POMDP{S,A,O}) where {S,A,O}
     cache = BeliefCache{S}(min(sol.tree_queries, sol.beliefcache_size), sol.n_particles)
 
+    na = length(actions(pomdp))
+
     tree = GuidedTree{S,Int,O}(
         min(sol.tree_queries, sol.treecache_size),
-        length(actions(pomdp)),
+        na,
         sol.check_repeat_obs, 
         sol.k_o
     )
 
     ordered_actions = POMDPTools.ordered_actions(pomdp)
-    live_actions = falses(length(ordered_actions))
+    live_actions = falses(na)
 
-    return GumbelPlanner(pomdp, sol, tree, cache, ordered_actions, live_actions)
+    q_extrema = [Inf, -Inf] # (min, max)
+
+    noisy_logits = zeros(na)
+
+    return GumbelPlanner(pomdp, sol, tree, cache, ordered_actions, live_actions, q_extrema, noisy_logits)
 end
 
 POMDPs.action(planner::GumbelPlanner, b) = first(POMDPTools.action_info(planner, b))
@@ -67,7 +90,7 @@ function POMDPTools.action_info(planner::GumbelPlanner, b)
 
     free!(cache)
 
-    g_P = initialize_root!(planner, b)
+    initialize_root!(planner, b)
     dN = tree_queries/(ceil(log2(m_acts_init)) * nextpow(2,m_acts_init))
     Ntarget = floor(Int, dN)
     ktarget = 1
@@ -79,7 +102,7 @@ function POMDPTools.action_info(planner::GumbelPlanner, b)
             ktarget *= 2
             Ntarget += floor(Int, ktarget * dN)
 
-            reduce_root_actions(planner, g_P)
+            reduce_root_actions(planner)
             @assert count(live_actions) > 0
             count(live_actions) == 1 && break
 
@@ -111,10 +134,10 @@ function POMDPTools.action_info(planner::GumbelPlanner, b)
 end
 
 function initialize_root!(planner, b)
-    (; tree, cache, sol, pomdp, live_actions) = planner
+    (; tree, cache, sol, pomdp, live_actions, noisy_logits) = planner
     (; rng, n_particles, getpolicyvalue, m_acts_init, stochastic_root) = sol
 
-    s,w = gen_empty_belief(cache, n_particles)
+    s, w = gen_empty_belief(cache, n_particles)
     particle_b = initialize_belief!(rng, s, w, pomdp, b)
 
     na = length(actions(pomdp))
@@ -124,19 +147,24 @@ function initialize_root!(planner, b)
     V = pv.value
     insert_root!(tree, particle_b, V, P)
 
-    noise = -log.(-log.(rand(rng, na)))
-    g_P = stochastic_root ? P + noise : P
+
+    if stochastic_root
+        # gumbel distribution
+        rand!(rng, noisy_logits)
+        map!(x -> -log(-log(x)), noisy_logits, noisy_logits)
+    else
+        fill!(noisy_logits, zero(eltype(noisy_logits)))
+    end
+    map!(+, noisy_logits, noisy_logits, P) # zero allocations this way
 
     fill!(live_actions, false)
-    top_a_idx = sortperm(g_P; rev=true)
-    for i in 1:na
-        i > m_acts_init && continue
-        ai = top_a_idx[i]
+    top_a_idx = sortperm(noisy_logits; rev=true) # allocation :(
+    for ai in top_a_idx[1:m_acts_init]
         live_actions[ai] = true
         insert_action!(tree, 1, ai)
     end
     
-    return g_P
+    return nothing
 end
 
 function select_root_action(planner::GumbelPlanner, Ntarget)
@@ -155,50 +183,20 @@ function select_root_action(planner::GumbelPlanner, Ntarget)
     return nothing
 end
 
-function get_dq_extrema(tree::GuidedTree, b_idx::Int, na::Int)
-    if length(tree.b_children[b_idx]) == na
-        min_q = Inf
-        max_q = -Inf
-    else
-        min_q = max_q = Float64(tree.b_V[b_idx])
-    end
-
-    for (_, ba_idx) in tree.b_children[b_idx]
-        q = tree.Qha[ba_idx]
-
-        if q < min_q
-            min_q = q
-        elseif q > max_q
-            max_q = q
-        end
-    end
-
-    dq  = max_q - min_q
-    dq = dq < 1e-6 ? one(dq) : dq
-
-    return dq
-end
-
-function reduce_root_actions(planner::GumbelPlanner, g_P)
-    (; tree, sol, live_actions) = planner
+function reduce_root_actions(planner::GumbelPlanner)
+    (; tree, sol, live_actions, noisy_logits) = planner
     (; cscale, cvisit) = sol
 
-    dq = get_dq_extrema(tree, 1, length(live_actions))
-    # dq = 1.0
-
-    Nmax = 0
-    for (_, ba_idx) in tree.b_children[1]
-        Nmax = max(Nmax, tree.Nha[ba_idx])
-    end
-
+    dq = get_dq(planner)
+    Nmax = iszero(tree.Nh[1]) ? 0 : maximum(tree.Nha[ba_idx] for (_, ba_idx) in tree.b_children[1])
     sigma = cscale * (cvisit + Nmax) / dq
 
-    for i in 1:floor(Int, count(live_actions)/2)
+    for _ in 1:floor(Int, count(live_actions)/2)
         local aidx_min::Int
         valmin = Inf
         for (ai, ba_idx) in tree.b_children[1]
             !live_actions[ai] && continue
-            val = g_P[ai] + sigma * tree.Qha[ba_idx]
+            val = noisy_logits[ai] + sigma * tree.Qha[ba_idx]
             if val < valmin
                 valmin = val
                 aidx_min = ai
@@ -213,28 +211,23 @@ function mcts_main(planner::GumbelPlanner, b_idx::Int, d::Int)
     (; tree, sol, ordered_actions) = planner
     (; cscale, cvisit) = sol
 
-    Nmax = 0
-    for (_, ba_idx) in tree.b_children[b_idx]
-        Nmax = max(Nmax, tree.Nha[ba_idx])
-    end
+    Nmax = iszero(tree.Nh[b_idx]) ? 0 : maximum(tree.Nha[ba_idx] for (_, ba_idx) in tree.b_children[b_idx])
+    dq = get_dq(planner)
+    sigma = cscale * (cvisit + Nmax) / dq
 
-    sigma = cscale * (cvisit + Nmax)
-    v = tree.b_V[b_idx]
+    P = softmax(tree.b_P[b_idx])
+    sum_pi = sum(P[ai] for (ai, _) in tree.b_children[b_idx]; init=zero(eltype(P)))
+    sum_pi_q = sum(P[ai] * tree.Qha[ba_idx] for (ai,ba_idx) in tree.b_children[b_idx]; init=zero(eltype(tree.Qha)))
+    v_mix = (tree.b_V[b_idx] + tree.Nh[b_idx] / sum_pi * sum_pi_q) / (1 + tree.Nh[b_idx])
 
-    dq = get_dq_extrema(tree, b_idx, length(ordered_actions))
-    # dq = 1.0
-
-    sigma_v_norm = sigma * v / dq
-
-    new_logits = tree.b_P[b_idx] .+ sigma_v_norm # add a cache here!!!
+    new_logits = tree.b_P[b_idx] .+ sigma * v_mix
     for (ai, ba_idx) in tree.b_children[b_idx]
-        new_logits[ai] += sigma * tree.Qha[ba_idx] / dq - sigma_v_norm
+        new_logits[ai] += sigma * (tree.Qha[ba_idx] - v_mix)
     end
     pi_completed = softmax!(new_logits)
 
-    Nh_1 = 1 + tree.Nh[b_idx]
     for (ai, ba_idx) in tree.b_children[b_idx]
-        pi_completed[ai] -= tree.Nha[ba_idx]/Nh_1
+        pi_completed[ai] -= tree.Nha[ba_idx] / (1 + tree.Nh[b_idx])
     end
 
     opt_ai = argmax(pi_completed)
@@ -249,7 +242,7 @@ function mcts_main(planner::GumbelPlanner, b_idx::Int, a, ba_idx::Int, d::Int)
     (; max_depth, k_o, alpha_o, rng, check_repeat_obs) = sol
 
     if d==max_depth || isterminalbelief(tree.b[b_idx])
-        return tree.b_V[b_idx]
+        return 0.0
     end
 
     # observation/belief widening
@@ -279,6 +272,8 @@ function mcts_main(planner::GumbelPlanner, b_idx::Int, a, ba_idx::Int, d::Int)
     tree.Nha[ba_idx] += 1
     tree.Qha[ba_idx] += (total - tree.Qha[ba_idx]) / tree.Nha[ba_idx]
 
+    update_dq!(planner, tree.Qha[ba_idx])
+
     # return sum of rewards
     return total::Float64
 end
@@ -288,6 +283,7 @@ function insert_new_belief!(planner, b, ba_idx, a, o, p_idx, sample_sp, sample_r
     (; rng, check_repeat_obs, resample, getpolicyvalue) = sol
 
     bp_particles, bp_weights = gen_empty_belief(cache, n_particles(b))
+
     bp, r, nt_prob = GenBelief(
         rng, bp_particles, bp_weights, cache.resample, 
         pomdp, b, a, o, p_idx, sample_sp, sample_r, resample
@@ -296,6 +292,8 @@ function insert_new_belief!(planner, b, ba_idx, a, o, p_idx, sample_sp, sample_r
     (; value, policy) = getpolicyvalue(bp)
 
     bp_idx = insert_belief!(tree, bp, ba_idx, o, r, nt_prob, value, policy, check_repeat_obs)
+    
+    update_dq!(planner, value)
 
     return bp_idx, value
 end

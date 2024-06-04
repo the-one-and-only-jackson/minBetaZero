@@ -8,7 +8,7 @@ import POMDPTools
 using Random
 using PushVectors
 using ParticleFilters
-using NNlib: softmax!
+using NNlib: softmax!, softmax
 
 include("cache.jl")
 include("pushvector.jl")
