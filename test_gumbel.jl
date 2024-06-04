@@ -7,17 +7,18 @@ using Distributed
 #     sshflags=`-vvv`
 # )
 
-addprocs(10)
+addprocs(20)
 
 @everywhere begin
     using minBetaZero
+    using ParticleFilterTrees
     using POMDPs
     using POMDPTools
     using ParticleFilters
     using Flux
     using Statistics
     using Plots
-    using ProgressMeter, ParticleFilterTrees
+    using ProgressMeter
 end
 
 @everywhere include("models/LightDark.jl")
@@ -36,28 +37,35 @@ params = minBetaZeroParameters(
         n_particles         = 100,
         tree_queries        = 100,
         max_time            = Inf,
-        k_o                 = 30.,
+        k_o                 = 20.,
         alpha_o             = 0.,
         check_repeat_obs    = true,
         resample            = true,
-        treecache_size      = 1_000, 
-        beliefcache_size    = 1_000,
+        treecache_size      = 10_000, 
+        beliefcache_size    = 10_000,
         m_acts_init         = 3,
         cscale              = 1.,
         cvisit              = 50.
     ),
     t_max           = 50,
     n_episodes      = 20,
-    n_iter          = 250,
+    n_iter          = 1000,
     batchsize       = 128,
     lr              = 3e-4,
-    lambda          = 0.0,
+    lambda          = 1e-3,
     plot_training   = false,
     train_device    = gpu,
     inference_device = gpu,
-    buff_cap = 20_000,
-    train_intensity = 100,
+    buff_cap = 25_000,
+    train_intensity = 16,
+    warmup_steps = 9_000
 )
+
+function f(buff_cap, train_intensity, warmup_steps)
+    sum(1 - ((i-1)/i)^train_intensity for i in warmup_steps:buff_cap)
+end
+
+f(25_000, 16, 9_000)
 
 nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
     action_size         = 3,
@@ -91,6 +99,9 @@ for (_, info) in results
     plot!(p, info[:episodes], info[:returns]; label=false)
 end
 p
+
+# first plot cscale 1
+# second plot cscale 0.1
 
 
 master_results = deepcopy(results)    

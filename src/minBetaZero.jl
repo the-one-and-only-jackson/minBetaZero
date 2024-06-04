@@ -56,6 +56,7 @@ include("tools.jl")
     n_particles = 500
     use_belief_reward = true
     train_intensity = 4
+    warmup_steps = buff_cap ÷ train_intensity
 end
 
 struct RandPlanner{A} <: Policy
@@ -79,7 +80,7 @@ POMDPs.action(p::netPolicyStoch, b) = p.ordered_actions[argmax(getlogits(p.net, 
 getlogits(net::ActorCritic, b) = vec(net(input_representation(b); logits=true).policy)
 
 function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
-    (; n_iter, input_dims, na, buff_cap, n_particles, train_intensity) = params
+    (; n_iter, input_dims, na, buff_cap, n_particles, train_intensity, warmup_steps) = params
 
     info = Dict(
         :steps => Int[],
@@ -91,16 +92,12 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
 
     buffer = DataBuffer((input_dims..., n_particles), na, buff_cap)
 
-    steps_since_last_train = 0
-
     for itr in 1:n_iter+1
         iter_timer = time()
 
         @info itr <= n_iter ? "Gathering Data - Iteration: $itr" : "Gathering Data - Final Evaluation"
         returns, steps = gen_data_distributed(pomdp, net, params, buffer; rand_policy = false)
-        
-        steps_since_last_train += steps
-        
+                
         episodes = length(returns)
         returns_mean = mean(returns)
         returns_error = std(returns)/sqrt(length(returns))
@@ -125,21 +122,19 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         # This is so wez get the stats after the n_iter network update
         itr == n_iter+1 && break
 
-
-        n_epochs = floor(Int, steps_since_last_train * train_intensity / buff_cap)
-
-        if n_epochs > 0
+        if buffer.length == buffer.capacity && buffer.length >= warmup_steps
+            println("in loop")
+            idxs = randperm(buffer.length)[1:steps*train_intensity]
             train_data = (; 
-                x = select_last_dim(buffer.network_input, 1:buffer.length),
-                value_target = select_last_dim(buffer.value_target, 1:buffer.length),
-                policy_target = select_last_dim(buffer.policy_target, 1:buffer.length),
+                x = select_last_dim(buffer.network_input, idxs),
+                value_target = select_last_dim(buffer.value_target, idxs),
+                policy_target = select_last_dim(buffer.policy_target, idxs),
             )
 
-            net, train_info = train!(net, train_data, params; n_epochs)
+            net, train_info = train!(net, train_data, params)
             push!(info[:training], train_info)
-
-            steps_since_last_train = 0
         end
+
 
         iter_time = ceil(Int, time()-iter_timer)
         @info "Iteration time: $iter_time seconds"
@@ -348,14 +343,14 @@ function test_network(net, pomdp, params; n_episodes=500, type=netPolicyStoch)
 end
 
 
-function train!(net, data, params::minBetaZeroParameters; n_epochs=1)
+function train!(net, data, params::minBetaZeroParameters)
     (; batchsize, lr, lambda, train_device, plot_training) = params
 
     Etrain = mean(-sum(x->iszero(x) ? x : x*log(x), data.policy_target; dims=1))
     varVtrain = var(data.value_target)
 
     train_batchsize = min(batchsize, Flux.numobs(data))
-    train_data = Flux.DataLoader(data; batchsize=train_batchsize, shuffle=true, partial=false) |> train_device
+    train_data = Flux.DataLoader(data; batchsize=train_batchsize, shuffle=true, partial=true) |> train_device
 
     @info "Training on $(Flux.numobs(data)) samples"
 
@@ -364,10 +359,8 @@ function train!(net, data, params::minBetaZeroParameters; n_epochs=1)
 
     info = Dict(:policy_loss=>Float32[], :policy_KL=>Float32[], :value_loss=>Float32[], :value_FVU=>Float32[])
     
-    progress = Progress(n_epochs * length(train_data))
-
     Flux.trainmode!(net) 
-    for _ in 1:n_epochs, (; x, value_target, policy_target) in train_data
+    @showprogress for (; x, value_target, policy_target) in train_data
         grads = Flux.gradient(net) do net
             losses = getloss(net, x; value_target, policy_target)
 
@@ -382,8 +375,6 @@ function train!(net, data, params::minBetaZeroParameters; n_epochs=1)
             return losses.value_loss + losses.policy_loss
         end
         Flux.update!(opt, net, grads[1])
-
-        next!(progress)
     end
     Flux.testmode!(net)
 
