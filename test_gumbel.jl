@@ -7,11 +7,10 @@ using Distributed
 #     sshflags=`-vvv`
 # )
 
-addprocs(20)
+addprocs(10)
 
 @everywhere begin
     using minBetaZero
-
     using POMDPs
     using POMDPTools
     using ParticleFilters
@@ -48,15 +47,16 @@ params = minBetaZeroParameters(
         cvisit              = 50.
     ),
     t_max           = 50,
-    n_episodes      = 40,
-    n_iter          = 500,
+    n_episodes      = 20,
+    n_iter          = 250,
     batchsize       = 128,
     lr              = 3e-4,
     lambda          = 0.0,
     plot_training   = false,
     train_device    = gpu,
     inference_device = gpu,
-    buff_cap = 40_000
+    buff_cap = 20_000,
+    train_intensity = 100,
 )
 
 nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
@@ -92,43 +92,92 @@ for (_, info) in results
 end
 p
 
-results
+
+master_results = deepcopy(results)    
+
+
+
+params = minBetaZeroParameters(
+    GumbelSolver_args = (;
+        max_depth           = 10,
+        n_particles         = 500,
+        tree_queries        = 100,
+        max_time            = Inf,
+        k_o                 = 30.,
+        alpha_o             = 0.,
+        check_repeat_obs    = true,
+        resample            = true,
+        treecache_size      = 1_000, 
+        beliefcache_size    = 1_000,
+        m_acts_init         = 3,
+        cscale              = 1.,
+        cvisit              = 50.
+    ),
+    t_max           = 50,
+    n_episodes      = 40,
+    n_iter          = 500,
+    batchsize       = 128,
+    lr              = 3e-4,
+    lambda          = 0.0,
+    plot_training   = false,
+    train_device    = gpu,
+    inference_device = gpu,
+    buff_cap = 40_000,
+    n_particles = 500,
+)
     
+
+net = results[1][1]
+pomdp = LightDarkPOMDP()
+
+
+data = minBetaZero.test_network(net, pomdp, params; n_episodes=10_000, type=minBetaZero.netPolicyStoch)
+histogram(data)
+mean(data)
+std(data)/sqrt(length(data))
+
+data = minBetaZero.test_network(net, pomdp, params; n_episodes=10_000, type=minBetaZero.netPolicy)
+histogram(data)
+mean(data)
+std(data)/sqrt(length(data))
+
+data = gen_data_distributed(pomdp, net, params; n_episodes=10_000)
+histogram(data)
+mean(data)
+std(data)/sqrt(length(data))
+
+
+
+function gen_data_distributed(pomdp, net, params::minBetaZeroParameters; n_episodes=100)
+    (; GumbelSolver_args) = params
     
+    ret_vec = Float32[]
 
-master_net = deepcopy(net)
+    data = pmap(1:nworkers()) do i
+        function getpolicyvalue(b)
+            b_rep = minBetaZero.input_representation(b)
+            out = net(b_rep; logits=true)
+            return (; value=out.value[], policy=vec(out.policy))
+        end
+        planner = solve(GumbelSolver(; getpolicyvalue, GumbelSolver_args...), pomdp)
 
+        local_data = []
+        for _ in 1:floor(n_episodes/nworkers())
+            data = minBetaZero.work_fun(pomdp, planner, params)
+            push!(local_data, data)
+        end
 
-
-training_dict = Dict(k => Float32[] for k in keys(first(info[:training])))
-for d in info[:training]
-    for (k, v) in d
-        append!(training_dict[k], v)
+        return local_data
     end
+
+    ret_vec = Float32[]
+    for local_data in data, d in local_data
+        push!(ret_vec, d.returns)
+    end
+
+
+    return ret_vec
 end
 
-plot(training_dict[:value_loss])
-plot(training_dict[:policy_loss])   
 
-
-
-function getpolicyvalue(b)
-    b_rep = input_representation(b)
-    out = net(b_rep; logits=true)
-    return (; value=out.value[], policy=vec(out.policy))
-end
-planner = solve(GumbelSolver(; getpolicyvalue, params.GumbelSolver_args...), pomdp)
-
-up = BootstrapFilter(pomdp, 1000)
-b = initialize_belief(up, initialstate(pomdp))
-s = rand(initialstate(pomdp))
-
-a, act_info = action_info(planner, b)
-getpolicyvalue(b).policy
-act_info.Q_root
-act_info.N_root
-
-s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
-
-b = POMDPs.update(up, b, a, o)
 

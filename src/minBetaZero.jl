@@ -55,6 +55,7 @@ include("tools.jl")
     buff_cap = 10_000
     n_particles = 500
     use_belief_reward = true
+    train_intensity = 4
 end
 
 struct RandPlanner{A} <: Policy
@@ -78,7 +79,7 @@ POMDPs.action(p::netPolicyStoch, b) = p.ordered_actions[argmax(getlogits(p.net, 
 getlogits(net::ActorCritic, b) = vec(net(input_representation(b); logits=true).policy)
 
 function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
-    (; n_iter, input_dims, na, buff_cap, n_particles) = params
+    (; n_iter, input_dims, na, buff_cap, n_particles, train_intensity) = params
 
     info = Dict(
         :steps => Int[],
@@ -90,11 +91,15 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
 
     buffer = DataBuffer((input_dims..., n_particles), na, buff_cap)
 
+    steps_since_last_train = 0
+
     for itr in 1:n_iter+1
         iter_timer = time()
 
         @info itr <= n_iter ? "Gathering Data - Iteration: $itr" : "Gathering Data - Final Evaluation"
         returns, steps = gen_data_distributed(pomdp, net, params, buffer; rand_policy = false)
+        
+        steps_since_last_train += steps
         
         episodes = length(returns)
         returns_mean = mean(returns)
@@ -117,17 +122,24 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         _re = round(returns_error; sigdigits=1)
         @info "Network mean return $_rm +/- $_re"
 
-        # This is so we get the stats after the n_iter network update
+        # This is so wez get the stats after the n_iter network update
         itr == n_iter+1 && break
 
-        train_data = (; 
-            x = select_last_dim(buffer.network_input, 1:buffer.length),
-            value_target = select_last_dim(buffer.value_target, 1:buffer.length),
-            policy_target = select_last_dim(buffer.policy_target, 1:buffer.length),
-        )
 
-        net, train_info = train!(net, train_data, params)
-        push!(info[:training], train_info)
+        n_epochs = floor(Int, steps_since_last_train * train_intensity / buff_cap)
+
+        if n_epochs > 0
+            train_data = (; 
+                x = select_last_dim(buffer.network_input, 1:buffer.length),
+                value_target = select_last_dim(buffer.value_target, 1:buffer.length),
+                policy_target = select_last_dim(buffer.policy_target, 1:buffer.length),
+            )
+
+            net, train_info = train!(net, train_data, params; n_epochs)
+            push!(info[:training], train_info)
+
+            steps_since_last_train = 0
+        end
 
         iter_time = ceil(Int, time()-iter_timer)
         @info "Iteration time: $iter_time seconds"
@@ -141,7 +153,7 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
 end
 
 function gen_data_distributed(pomdp, net, params::minBetaZeroParameters, buffer::DataBuffer; rand_policy=false)
-    (; n_episodes, inference_device, GumbelSolver_args) = params
+    (; n_episodes, GumbelSolver_args) = params
     
     progress = Progress(n_episodes)
     steps = 0
@@ -325,10 +337,10 @@ function work_fun(pomdp, planner, params)
     return data
 end
 
-function test_network(net, pomdp, params)
-    ret_vec = zeros(Float32, 500)
-    Threads.@threads for i in 1:length(ret_vec)
-        planner = netPolicyStoch(net, actions(pomdp))
+function test_network(net, pomdp, params; n_episodes=500, type=netPolicyStoch)
+    ret_vec = zeros(Float32, n_episodes)
+    Threads.@threads for i in 1:n_episodes
+        planner = type(net, actions(pomdp))
         data = work_fun(pomdp, planner, params)
         ret_vec[i] = data.returns
     end
@@ -336,7 +348,7 @@ function test_network(net, pomdp, params)
 end
 
 
-function train!(net, data, params::minBetaZeroParameters)
+function train!(net, data, params::minBetaZeroParameters; n_epochs=1)
     (; batchsize, lr, lambda, train_device, plot_training) = params
 
     Etrain = mean(-sum(x->iszero(x) ? x : x*log(x), data.policy_target; dims=1))
@@ -351,9 +363,11 @@ function train!(net, data, params::minBetaZeroParameters)
     opt = Flux.setup(Flux.Optimiser(Flux.Adam(lr), WeightDecay(lr*lambda)), net)
 
     info = Dict(:policy_loss=>Float32[], :policy_KL=>Float32[], :value_loss=>Float32[], :value_FVU=>Float32[])
-        
-    Flux.trainmode!(net)
-    @showprogress for (; x, value_target, policy_target) in train_data
+    
+    progress = Progress(n_epochs * length(train_data))
+
+    Flux.trainmode!(net) 
+    for _ in 1:n_epochs, (; x, value_target, policy_target) in train_data
         grads = Flux.gradient(net) do net
             losses = getloss(net, x; value_target, policy_target)
 
@@ -368,6 +382,8 @@ function train!(net, data, params::minBetaZeroParameters)
             return losses.value_loss + losses.policy_loss
         end
         Flux.update!(opt, net, grads[1])
+
+        next!(progress)
     end
     Flux.testmode!(net)
 
