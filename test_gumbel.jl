@@ -7,7 +7,7 @@ using Distributed
 #     sshflags=`-vvv`
 # )
 
-addprocs(10)
+addprocs(2)
 
 @everywhere begin
     using minBetaZero
@@ -47,7 +47,7 @@ params = minBetaZeroParameters(
         cvisit              = 50.
     ),
     t_max           = 50,
-    n_episodes      = 50,
+    n_episodes      = 60,
     n_iter          = 200,
     batchsize       = 128,
     lr              = 3e-4,
@@ -55,16 +55,16 @@ params = minBetaZeroParameters(
     plot_training   = false,
     train_device    = gpu,
     inference_device = gpu,
-    buff_cap = 20_000,
+    buff_cap = 50_000,
     train_intensity = 16,
-    warmup_steps = 4_000
+    warmup_steps = 18_000
 )
 
 function f(buff_cap, train_intensity, warmup_steps)
     sum(1 - ((i-1)/i)^train_intensity for i in warmup_steps:buff_cap)
 end
 
-f(20_000, 8, 4_000)
+f(50_000, 16, 18_000)
 
 nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
     action_size         = 3,
@@ -93,11 +93,35 @@ for _ in 1:5
     push!(results, (net, info))
 end
 
-p = plot(xlabel="Episodes", title="Mean Episodic Return - $(params.buff_cap) Buffer - $(params.n_episodes) Episodes")
-for (_, info) in results
-    plot!(p, info[:episodes], info[:returns]; label=false)
+# p = plot(xlabel="Episodes", title="Mean Episodic Return - $(params.buff_cap) Buffer - $(params.n_episodes) Episodes")
+# for (_, info) in results
+#     plot!(p, info[:episodes], info[:returns]; label=false)
+# end
+# p
+
+p = plot()
+
+x = results[1][2][:episodes]
+y = stack(x->x[2][:returns], results)
+mu, bounds = ci_bounds(y)
+error_plot!(p, x, mu, bounds; label="Intensity = 16 - 50k", xlabel="Episodes", ylabel="Return", title="Mean Episodic Return")
+
+function ci_bounds(y; ci=0.95, dim=argmin(size(y)))
+    n = size(y, dim)
+    t = quantile(TDist(n-1), 1-(1-ci)/2)
+    mu = mean(y; dims=dim)
+    diff = t * std(y; dims=dim) / sqrt(n)
+    bounds = mu .+ cat(-diff, diff; dims=dim)
+    return mu, bounds
 end
-p
+
+error_plot(args...; kwargs...) = error_plot!(plot(), args...; kwargs...)
+error_plot!(p, y, bounds; kwargs...) = error_plot!(p, 1:length(y), y, bounds; kwargs...)
+function error_plot!(p, x, y, bounds; c=1+p.n÷2, fillcolor=c, fillalpha=0.2, linealpha=0, bounds_label=false, label=false, linewidth=1.5, kwargs...)
+    plot!(p, x, bounds[:,1]; fillrange = bounds[:,2], fillalpha, linealpha, fillcolor, label=bounds_label, kwargs...)
+    plot!(p, x, y; label, linewidth, c, kwargs...)
+end
+
 
 # first plot cscale 1
 # second plot cscale 0.1

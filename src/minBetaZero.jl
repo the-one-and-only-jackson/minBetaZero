@@ -97,7 +97,7 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         iter_timer = time()
 
         @info itr <= n_iter ? "Gathering Data - Iteration: $itr" : "Gathering Data - Final Evaluation"
-        returns, steps = gen_data_distributed(pomdp, net, params, buffer)
+        returns, steps = gen_data_threaded(pomdp, net, params, buffer)
                 
         episodes = length(returns)
         returns_mean = mean(returns)
@@ -148,118 +148,103 @@ end
 function gen_data_distributed(pomdp::POMDP, net, params::minBetaZeroParameters, buffer::DataBuffer)
     (; n_episodes, GumbelSolver_args) = params
     
-    progress = Progress(ceil(Int, n_episodes/nworkers())*nworkers())
     storage_channel = RemoteChannel(()->Channel{Any}())
-    ret_vec = Float32[]
+
+    data_task = Threads.@spawn collect_data(buffer, storage_channel, n_episodes)
+    errormonitor(data_task)
+
+    pmap(1:nworkers()) do _
+        getpolicyvalue = getpolicyvalue_cpu(net)
+        solver = GumbelSolver(; getpolicyvalue, GumbelSolver_args...)
+        planner = solve(solver, pomdp)
+
+        for _ in 1:ceil(Int, n_episodes/nworkers())
+            data = work_fun(pomdp, planner, params)
+            put!(storage_channel, data)
+        end
+
+        return nothing
+    end
+
+    return fetch(data_task)
+end
+
+function collect_data(buffer::DataBuffer, storage_channel, n_episodes::Int)
+    progress = Progress(n_episodes)
+    ret_vec = zeros(Float32, n_episodes)
     steps = 0
 
-    @sync begin
-        Threads.@spawn try
-            while true
-                data = take!(storage_channel)
-                steps += length(data.value_target)
-                set_buffer!(
-                    buffer; 
-                    network_input = data.network_input, 
-                    value_target  = data.value_target, 
-                    policy_target = data.policy_target
-                )
-                push!(ret_vec, data.returns)
-                next!(progress)     
-            end
-        catch e
-            if isopen(storage_channel)
-                close(storage_channel)
-                display(e)
-                rethrow(e)
-            end        
-        end
-
-        pmap(1:nworkers()) do i
-            function getpolicyvalue(b)
-                b_rep = input_representation(b)
-                out = net(b_rep; logits=true)
-                return (; value=out.value[], policy=vec(out.policy))
-            end
-
-            planner = solve(GumbelSolver(; getpolicyvalue, GumbelSolver_args...), pomdp)
-
-            for _ in 1:ceil(Int, n_episodes/nworkers())
-                data = work_fun(pomdp, planner, params)
-                put!(storage_channel, data)
-            end
-
-            return nothing
-        end
-
-        close(storage_channel)
+    for i in 1:n_episodes
+        data = take!(storage_channel)
+        steps += length(data.value_target)
+        set_buffer!(
+            buffer; 
+            network_input = data.network_input, 
+            value_target  = data.value_target, 
+            policy_target = data.policy_target
+        )
+        ret_vec[i] = data.returns
+        next!(progress)
     end
 
     return ret_vec, steps
 end
 
-#= This is bugged right now? Not sure why returns are bad
-function gen_data(pomdp, net, params::minBetaZeroParameters, buffer::DataBuffer; rand_policy=false)
+function getpolicyvalue_cpu(net)
+    function getpolicyvalue(b)
+        b_rep = input_representation(b)
+        out = net(b_rep; logits=true)
+        return (; value=out.value[], policy=vec(out.policy))
+    end
+    return getpolicyvalue
+end
+
+function getpolicyvalue_gpu(querry_channel, response_channel)
+    function getpolicyvalue(b)
+        b_rep = input_representation(b)
+        put!(querry_channel, b_rep)
+        out = take!(response_channel)
+        return (; value=out.value[], policy=vec(out.policy))
+    end
+    return getpolicyvalue
+end
+
+function gen_data_threaded(pomdp::POMDP, net, params::minBetaZeroParameters, buffer::DataBuffer)
     (; n_episodes, inference_device, GumbelSolver_args) = params
     
-    worker_querries  = [Channel{Any}(1) for _ in 1:n_episodes]
-    master_responses = [Channel{Any}(1) for _ in 1:n_episodes]
-    data_channel = Channel{Any}(n_episodes)
+    worker_querries  = [Channel{Any}() for _ in 1:n_episodes]
+    master_responses = [Channel{Any}() for _ in 1:n_episodes]
+    storage_channel  = RemoteChannel(()->Channel{Any}())
 
-    progress = Progress(n_episodes)
-    steps = 0
-    ret_vec = Float32[]
+    data_task = Threads.@spawn collect_data(buffer, storage_channel, n_episodes)
+    errormonitor(data_task)
 
     @sync begin
-        Threads.@spawn try
-            master_function(net, inference_device, worker_querries, master_responses)
-        catch e
-            map(close, worker_querries)
-            map(close, master_responses)
-            close(data_channel)
-            rethrow(e)
-        end
+        master_task = Threads.@spawn master_function(net, inference_device, worker_querries, master_responses)
+        errormonitor(master_task)
 
         for (querry_channel, response_channel) in zip(worker_querries, master_responses) 
-            Threads.@spawn try 
-                if rand_policy
-                    planner = RandPlanner(pomdp)
-                else
-                    function getpolicyvalue(b)
-                        b_rep = input_representation(b)
-                        put!(querry_channel, b_rep)
-                        out = take!(response_channel)
-                        return (; value=out.value[], policy=vec(out.policy))
-                    end
-                    planner = solve(GumbelSolver(; getpolicyvalue, GumbelSolver_args...), pomdp)
-                end
-            
+            collector_task = Threads.@spawn begin 
+                getpolicyvalue = getpolicyvalue_gpu(querry_channel, response_channel)
+                solver = GumbelSolver(; getpolicyvalue, GumbelSolver_args...)
+                planner = solve(solver, pomdp)
+
                 data = work_fun(pomdp, planner, params)
+                put!(storage_channel, data)
 
-                put!(data_channel, data)
                 close(querry_channel)
                 close(response_channel)
-            catch e
-                close(querry_channel)
-                close(response_channel)
-                close(data_channel)
-                rethrow(e)
             end
-        end
-
-        while isready(data_channel) || any(isopen, worker_querries)
-            (; belief, value, policy, returns) = take!(data_channel)
-            set_buffer!(buffer; network_input=belief, value_target=value, policy_target=policy)
-            push!(ret_vec, returns)
-            steps += length(value)
-            next!(progress)
+            errormonitor(collector_task)
         end
     end
+
+    ret_vec, steps = fetch(data_task)
 
     return ret_vec, steps
 end
 
-function master_function(net, device, worker_querries, master_responses)    
+function master_function(net, device, worker_querries::Vector{<:Channel}, master_responses::Vector{<:Channel})    
     master_net = net |> device
 
     while any(isopen, worker_querries)
@@ -284,7 +269,7 @@ function master_function(net, device, worker_querries, master_responses)
 
     return nothing
 end
-=#
+
 
 function work_fun(pomdp, planner, params)
     (; t_max, n_particles, use_belief_reward) = params
@@ -321,12 +306,12 @@ function work_fun(pomdp, planner, params)
     end
 
     gamma = discount(pomdp)
+
     for i in length(state_reward)-1:-1:1
         state_reward[i] += gamma * state_reward[i+1]
     end
 
     if use_belief_reward
-        gamma = discount(pomdp)
         for i in length(belief_reward)-1:-1:1
             belief_reward[i] += gamma * belief_reward[i+1]
         end
