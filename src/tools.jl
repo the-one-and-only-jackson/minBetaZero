@@ -19,7 +19,7 @@ function DataBuffer(input_dims::Tuple{Vararg{Int}}, na::Int, capacity::Int)
 end
 
 function set_buffer!(b::DataBuffer; network_input, value_target, policy_target)
-    @assert (size(network_input)[1:end-1] == size(b.network_input)[1:end-1]) || (size(network_input) == size(b.network_input)[1:end-1])
+    @assert (size(network_input)[1:end-1] == size(b.network_input)[1:end-1]) || (size(network_input) == size(b.network_input)[1:end-1]) "$(size(network_input)), $(size(b.network_input))"
     @assert (size(value_target)[1:end-1] == size(b.value_target)[1:end-1]) || (size(value_target ) == size(b.value_target )[1:end-1]) "value $(size(value_target))"
     @assert (size(policy_target)[1:end-1] == size(b.policy_target)[1:end-1]) || (size(policy_target) == size(b.policy_target)[1:end-1])
 

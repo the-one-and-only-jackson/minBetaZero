@@ -7,7 +7,7 @@ using Distributed
 #     sshflags=`-vvv`
 # )
 
-# addprocs(20)
+addprocs(2)
 
 @everywhere begin
     using minBetaZero
@@ -18,15 +18,73 @@ using Distributed
     using Statistics
     using Plots
     using ProgressMeter
+    using StaticArrays
 end
 
-@everywhere include("models/LightDark.jl")
-@everywhere using .LightDark
+using POMDPs, POMDPTools
 
-@everywhere function minBetaZero.input_representation(b::AbstractParticleBelief{<:LightDarkState})
-    rep = Float32[p.y for p in particles(b)]
-    reshape(rep, 1, :)
+pomdp = cpp_emu_lasertag(4)
+
+@everywhere using LaserTag
+
+@everywhere function minBetaZero.input_representation(b::AbstractParticleBelief{LTState})
+    stack(y->convert(SVector{4, Int}, y), particles(b))
 end
+
+using ParticleFilters
+
+up = BootstrapFilter(pomdp, 100)
+init = initialstate(pomdp)
+b = initialize_belief(up, init)
+
+fieldnames(typeof(particle(b,1)))
+@time vcat(particle(b,1).robot, particle(b,1).opponent)
+
+function default_input_representation(b::AbstractParticleBelief)
+    stack(particles(b)) do s
+        convert(AbstractVector{Float32}, s)
+    end
+end
+
+default_input_representation(b)
+
+particle(b,1)
+convert_s(AbstractVector, particle(b,1))
+
+
+function f()
+    pomdp = cpp_emu_lasertag(4)
+    up = BootstrapFilter(pomdp, 100)
+    init = initialstate(pomdp)
+    b = initialize_belief(up, init)
+    @time stack(particles(b)) do s
+        vcat(s.robot, s.opponent)
+    end
+end
+f()
+
+
+LaserTagPOMDP{}(
+    10.0,
+    1.0,
+    0.95,
+    LaserTag.Floor(7,11),
+    Set{LaserTag.Coord}(),
+    nothing,
+    false,
+    LaserTag.LTDistanceCache(LaserTag.Floor(7,11), Set{LaserTag.Coord}()),
+    LaserTag.DESPOTEmu(LaserTag.Floor(7,11), 2.5)
+)
+
+# @everywhere include("models/lasertag.jl")
+# @everywhere using .LaserTag
+
+# @everywhere function minBetaZero.input_representation(b::AbstractParticleBelief{<:LTState})
+#     stack(y->convert(SVector{4, Int}, y), particles(b))
+# end
+
+@everywhere using LaserTag
+
 
 @everywhere mean_std_layer(x) = dropdims(cat(mean(x; dims=2), std(x; dims=2); dims=1); dims=2)
 
@@ -36,53 +94,53 @@ params = minBetaZeroParameters(
         n_particles         = 100,
         tree_queries        = 100,
         max_time            = Inf,
-        k_o                 = 20.,
+        k_o                 = 10.,
         alpha_o             = 0.,
         check_repeat_obs    = true,
         resample            = true,
-        treecache_size      = 10_000, 
-        beliefcache_size    = 10_000,
-        m_acts_init         = 3,
+        treecache_size      = 1_000, 
+        beliefcache_size    = 1_000,
+        m_acts_init         = length(actions(DiscreteLaserTagPOMDP())),
         cscale              = 1.,
         cvisit              = 50.
     ),
-    t_max           = 50,
-    n_episodes      = 100,
-    n_iter          = 100,
+    t_max           = 100,
+    n_episodes      = 50,
+    n_iter          = 500,
     batchsize       = 128,
     lr              = 3e-4,
     lambda          = 1e-3,
     plot_training   = false,
     train_device    = gpu,
     inference_device = gpu,
-    buff_cap = 25_000,
+    buff_cap = 50_000,
     train_intensity = 8,
-    warmup_steps = 5_000
+    warmup_steps = 10_000,
+    input_dims = (4,)
 )
 
 function f(buff_cap, train_intensity, warmup_steps)
     sum(1 - ((i-1)/i)^train_intensity for i in warmup_steps:buff_cap)
 end
 
-f(25_000, 8, 5_000)
+f(50_000, 8, 10_000)
 
 nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
-    action_size         = 3,
-    input_size          = (1,),
+    action_size         = length(actions(DiscreteLaserTagPOMDP())),
+    input_size          = (4,),
     critic_loss         = Flux.Losses.logitcrossentropy,
     critic_categories   = collect(-100:10:100),
     p_dropout           = 0.1,
     neurons             = 64,
     hidden_layers       = 2,
     shared_net          = mean_std_layer,
-    shared_out_size     = (2,) # must manually set... fix at a later date...        
+    shared_out_size     = (4*2,) # must manually set... fix at a later date...        
 )
 
-# do multiple epochs and checkpointing
 
 results = []
 for _ in 1:5
-    @time net, info = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params));
+    @time net, info = betazero(params, DiscreteLaserTagPOMDP(), ActorCritic(nn_params));
 
     plot(
         plot(info[:steps], info[:returns]; label=false, xlabel="Steps", title="Mean Episodic Return"),

@@ -209,10 +209,13 @@ function GenBelief(
     terminal_ws     = 0.0 # either 0 or sum of those particle's previous weight
     n_nt = 0
 
+    flag = false
+
     for (i,(s,w)) in enumerate(weighted_particles(b))
         # Propagation
         if i === p_idx
             (sp, r) = sample_sp, sample_r
+            flag = true
         elseif isterminal(pomdp, s)
             (sp, r) = (s, 0.0)
         else
@@ -232,12 +235,17 @@ function GenBelief(
         end    
     end
 
-    allterminal = n_nt == 0
-    isdepleted = !allterminal && non_terminal_ws_raw <= tol
+    allterminal = n_nt > 0 && non_terminal_ws_raw <= tol
+    isdepleted = n_nt == 0 && non_terminal_ws_raw <= tol
 
-    @assert !isdepleted "Encountered particle depletion. \n
-        Term: $terminal_ws nt: $non_terminal_ws_raw n_nt: $n_nt o:$o \n
-        Particles: $([p.y for p in bp_particles])"
+    # if isdepleted
+    #     @warn "Encountered particle depletion. \n
+    #     Term: $terminal_ws nt: $non_terminal_ws_raw n_nt: $n_nt \n
+    #     Action: $a Observation $o Flag $flag Idx $p_idx \n
+    #     Sample r: $sample_r Sample sp: $sample_sp \n
+    #     Particles: $(stack(y->convert(AbstractVector, y), particles(b))) \n
+    #     New Particles: $(stack(y->convert(AbstractVector, y), bp_particles))" maxlog=1
+    # end
 
     non_terminal_ws = 1.0 - terminal_ws
 

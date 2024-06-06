@@ -2,7 +2,7 @@ module LightDark
 
 using POMDPs
 using Distributions: Uniform, Normal
-using POMDPModelTools: ImplicitDistribution, Deterministic
+using POMDPTools: ImplicitDistribution, Deterministic
 
 export LightDarkPOMDP, LightDarkState
 

@@ -1,7 +1,7 @@
 module minBetaZero
 
 using Flux, CUDA
-using POMDPs, POMDPModelTools, POMDPTools
+using POMDPs, POMDPTools
 using ParticleFilters
 using Statistics, Distributions, Random
 using Pkg
@@ -11,9 +11,6 @@ using Distributed
 include("ParticleFilterTrees/ParticleFilterTrees.jl")
 using .ParticleFilterTrees
 export PFTBelief, GuidedTree, GumbelSolver, GumbelPlanner
-
-include("beliefmdp.jl")
-export ParticleBeliefMDP
 
 include("neural_network.jl")
 using .NeuralNet
@@ -76,12 +73,17 @@ struct netPolicyStoch{N,A} <: Policy
     net::N
     ordered_actions::A
 end
-POMDPs.action(p::netPolicyStoch, b) = p.ordered_actions[argmax(getlogits(p.net, b) + rand(Gumbel(),3))]
+POMDPs.action(p::netPolicyStoch, b) = p.ordered_actions[argmax(getlogits(p.net, b) + rand(Gumbel(), length(p.ordered_actions)))]
 
 getlogits(net::ActorCritic, b) = vec(net(input_representation(b); logits=true).policy)
 
 function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
     (; n_iter, input_dims, na, buff_cap, n_particles, train_intensity, warmup_steps) = params
+
+    @assert nworkers() > 1 || Threads.nthreads() > 1 """
+    Error: Distributed computing is not available. 
+    Please run `addprocs()` or start Julia with `--threads` to a value greater than 1.
+    """
 
     info = Dict(
         :steps => Int[],
@@ -91,13 +93,21 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         :training => Dict[]
     )
 
+    na = length(actions(pomdp))
+
     buffer = DataBuffer((input_dims..., n_particles), na, buff_cap)
 
     for itr in 1:n_iter+1
         iter_timer = time()
 
         @info itr <= n_iter ? "Gathering Data - Iteration: $itr" : "Gathering Data - Final Evaluation"
-        returns, steps = gen_data_threaded(pomdp, net, params, buffer)
+
+        if nworkers() > 1 # prioritize distributed ?
+            returns, steps = gen_data_distributed(pomdp, net, params, buffer)
+        else
+            returns, steps = gen_data_threaded(pomdp, net, params, buffer)
+        end
+        
                 
         episodes = length(returns)
         returns_mean = mean(returns)
@@ -113,7 +123,7 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         @info "Mean return $_rm +/- $_re"
         @info "Gathered $steps data points over $episodes episodes"
 
-        net_results = test_network(net, pomdp, params)
+        net_results = test_network(net, pomdp, params; n_episodes=100)
         returns_mean = mean(net_results)
         returns_error = std(net_results)/sqrt(length(net_results))
         _rm = round(returns_mean; sigdigits=1+Base.hidigit(returns_mean,10)-Base.hidigit(returns_error,10))
@@ -153,12 +163,18 @@ function gen_data_distributed(pomdp::POMDP, net, params::minBetaZeroParameters, 
     data_task = Threads.@spawn collect_data(buffer, storage_channel, n_episodes)
     errormonitor(data_task)
 
-    pmap(1:nworkers()) do _
+    pmap(1:nworkers()) do worker_idx
         getpolicyvalue = getpolicyvalue_cpu(net)
         solver = GumbelSolver(; getpolicyvalue, GumbelSolver_args...)
         planner = solve(solver, pomdp)
 
-        for _ in 1:ceil(Int, n_episodes/nworkers())
+        if worker_idx <= mod(n_episodes, nworkers())
+            n_episodes = n_episodes ÷ nworkers() + 1
+        else
+            n_episodes = n_episodes ÷ nworkers()
+        end
+
+        for _ in 1:n_episodes
             data = work_fun(pomdp, planner, params)
             put!(storage_channel, data)
         end
@@ -186,6 +202,8 @@ function collect_data(buffer::DataBuffer, storage_channel, n_episodes::Int)
         ret_vec[i] = data.returns
         next!(progress)
     end
+    
+    close(storage_channel)
 
     return ret_vec, steps
 end
@@ -202,41 +220,81 @@ end
 function getpolicyvalue_gpu(querry_channel, response_channel)
     function getpolicyvalue(b)
         b_rep = input_representation(b)
-        put!(querry_channel, b_rep)
+        put!(querry_channel, (response_channel, b_rep))
         out = take!(response_channel)
         return (; value=out.value[], policy=vec(out.policy))
     end
     return getpolicyvalue
 end
 
+@kwdef struct GPUQuerry{C<:Channel, A<:AbstractArray, L<:Base.AbstractLock, E<:Threads.Event}
+    channels::Vector{C} = Channel[]
+    querries::A
+    lock::L = ReentrantLock()
+    hasdata::E = Event()
+end
+GPUQuerry(sz) = GPUQuerry(; querries = CUDA.pin(zeros(Float32, sz)))
+
+function togpuchannel!(ch::Channel, batched_querries::GPUQuerry)
+    batched_data = (copy(batched_querries.channels), cu(batched_querries.querries))
+    put!(ch, batched_data)
+    empty!(batched_querries.channels)
+    reset(batched_querries.hasdata)
+end
+
+
 function gen_data_threaded(pomdp::POMDP, net, params::minBetaZeroParameters, buffer::DataBuffer)
     (; n_episodes, inference_device, GumbelSolver_args) = params
-    
-    worker_querries  = [Channel{Any}() for _ in 1:n_episodes]
-    master_responses = [Channel{Any}() for _ in 1:n_episodes]
-    storage_channel  = RemoteChannel(()->Channel{Any}())
 
+    storage_channel  = Channel{Any}(n_episodes)
     data_task = Threads.@spawn collect_data(buffer, storage_channel, n_episodes)
     errormonitor(data_task)
+    bind(storage_channel, data_task)
 
     @sync begin
-        master_task = Threads.@spawn master_function(net, inference_device, worker_querries, master_responses)
-        errormonitor(master_task)
 
-        for (querry_channel, response_channel) in zip(worker_querries, master_responses) 
-            collector_task = Threads.@spawn begin 
-                getpolicyvalue = getpolicyvalue_gpu(querry_channel, response_channel)
+        gpu_results_ch = Channel{Tuple{<:Any, <:Any}}(n_episodes; spawn=true) do ch
+            for (response_chs, gpu_results) in ch
+                cpu_results = cpu(gpu_results)
+                for (i, response_ch) in enumerate(response_chs)
+                    response = (; value=cpu_results.value[i], policy=cpu_results.policy[:,i])
+                    put!(response_ch, response)
+                end
+            end
+            return nothing
+        end
+
+        gpu_compute_ch = Channel{Tuple{Vector{<:Channel}, <:CuArray}}(n_episodes, spawn=true) do ch
+            gpu_net = gpu(net)
+            for (response_chs, input) in ch
+                gpu_results = gpu_net(input; logits=true)
+                put!(gpu_results_ch, (response_chs, gpu_results))
+            end
+            return nothing
+        end
+
+        querry_ch = Channel{Tuple{<:Channel, <:Array}}(n_episodes)
+
+        worker_responses = [
+            Channel{@NamedTuple{value::Float32, policy::Vector{Float32}}}(; spawn=true) do response_ch
+                getpolicyvalue = getpolicyvalue_gpu(querry_ch, response_ch)
                 solver = GumbelSolver(; getpolicyvalue, GumbelSolver_args...)
                 planner = solve(solver, pomdp)
-
                 data = work_fun(pomdp, planner, params)
                 put!(storage_channel, data)
-
-                close(querry_channel)
-                close(response_channel)
+                return nothing
             end
-            errormonitor(collector_task)
-        end
+            for _ in 1:n_episodes
+        ]
+
+        batchsize = 64
+        arr_sz = (size(buffer.network_input)[1:end-1]..., batchsize)
+        aggregator(gpu_compute_ch, querry_ch, worker_responses, arr_sz)
+
+        wait(data_task)
+        close(gpu_results_ch)
+        close(gpu_compute_ch)
+        close(querry_ch)
     end
 
     ret_vec, steps = fetch(data_task)
@@ -244,26 +302,55 @@ function gen_data_threaded(pomdp::POMDP, net, params::minBetaZeroParameters, buf
     return ret_vec, steps
 end
 
-function master_function(net, device, worker_querries::Vector{<:Channel}, master_responses::Vector{<:Channel})    
-    master_net = net |> device
 
-    while any(isopen, worker_querries)
-        idxs = isready.(worker_querries)
-        !any(idxs) && continue
 
-        if count(idxs) == 1
-            idx = findfirst(idxs)
-            querries = take!(worker_querries[idx])
-            querries_batched = reshape(querries, size(querries)..., 1)
-            results = master_net(querries_batched |> device; logits=true) |> cpu
-            put!(master_responses[idx], results)    
-        else
-            querries = take!.(worker_querries[idxs])
-            querries_batched = querries |> stack
-            results = master_net(querries_batched |> device; logits=true) |> cpu
-            dims = size(first(results),ndims(first(results)))
-            split_results = [(; value=results.value[:,i], policy=results.policy[:,i]) for i in 1:dims]
-            put!.(master_responses[idxs], split_results)
+
+function aggregator(
+    gpu_compute_ch::Channel{<:Tuple{Vector{<:Channel}, <:AbstractArray}}, 
+    querry_ch::Channel{Tuple{<:Channel, <:Array}}, 
+    worker_responses::Vector{<:Channel}, 
+    arr_dims::Tuple{Vararg{Int}}
+    )
+
+    try 
+        batched_querries = GPUQuerry(arr_dims)
+
+        Threads.@spawn for (ch, querry) in querry_ch
+            lock(batched_querries.lock) do
+                push!(batched_querries.channels, ch)
+                N = length(batched_querries.channels)
+                dst = select_last_dim(batched_querries.querries, N)
+                copyto!(dst, querry)
+
+                batchsize = min(arr_dims[end], count(isopen, worker_responses))
+                if N == batchsize
+                    togpuchannel!(gpu_compute_ch, batched_querries)
+                else
+                    notify(event)
+                end    
+
+                return nothing
+            end
+        end
+
+        Threads.@spawn begin
+            while count(isopen, worker_responses) > 0
+                if Base.n_avail(gpu_compute_ch) == 0
+                    wait(batched_querries.hasdata)
+                    lock(batched_querries.lock) do
+                        if length(batched_querries.channels) > 0
+                            togpuchannel!(gpu_compute_ch, batched_querries)
+                        end
+                        return nothing
+                    end
+                end
+            end
+        end
+    catch e
+        if isopen(querry_ch) && isopen(gpu_compute_ch)
+            close(querry_ch)
+            close(gpu_compute_ch)
+            rethrow(e)
         end
     end
 
@@ -278,14 +365,14 @@ function work_fun(pomdp, planner, params)
     b = initialize_belief(up, initialstate(pomdp))
     s = rand(initialstate(pomdp))
 
-    b_vec = typeof(b)[]
+    b_vec = []
     aid_vec = Int[]
     state_reward = Float32[]
     belief_reward = Float32[]
 
     for _ in 1:t_max
         a = action(planner, b)
-        aid = actionindex(pomdp,a)
+        aid = actionindex(pomdp, a)
         s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
 
         push!.((b_vec, aid_vec, state_reward), (b, aid, r))
@@ -330,11 +417,10 @@ function work_fun(pomdp, planner, params)
 end
 
 function test_network(net, pomdp, params; n_episodes=500, type=netPolicyStoch)
-    ret_vec = zeros(Float32, n_episodes)
-    Threads.@threads for i in 1:n_episodes
+    ret_vec = pmap(1:n_episodes) do _
         planner = type(net, actions(pomdp))
         data = work_fun(pomdp, planner, params)
-        ret_vec[i] = data.returns
+        return data.returns
     end
     return ret_vec
 end
