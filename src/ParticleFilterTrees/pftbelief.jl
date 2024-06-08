@@ -203,7 +203,6 @@ function GenBelief(
     tol::Float64 = eps()
     ) where {S,A,O}
 
-    N = n_particles(b)
     weighted_return = 0.0
     non_terminal_ws_raw = 0.0 # will be unnormalized
     terminal_ws     = 0.0 # either 0 or sum of those particle's previous weight
@@ -236,34 +235,17 @@ function GenBelief(
     end
 
     allterminal = n_nt > 0 && non_terminal_ws_raw <= tol
-    isdepleted = n_nt == 0 && non_terminal_ws_raw <= tol
-
-    # if isdepleted
-    #     @warn "Encountered particle depletion. \n
-    #     Term: $terminal_ws nt: $non_terminal_ws_raw n_nt: $n_nt \n
-    #     Action: $a Observation $o Flag $flag Idx $p_idx \n
-    #     Sample r: $sample_r Sample sp: $sample_sp \n
-    #     Particles: $(stack(y->convert(AbstractVector, y), particles(b))) \n
-    #     New Particles: $(stack(y->convert(AbstractVector, y), bp_particles))" maxlog=1
-    # end
 
     non_terminal_ws = 1.0 - terminal_ws
 
     # normalize weights
-    if !allterminal && !isdepleted
+    if !allterminal
         # reweight non-terminal particles
         normalizing_factor = non_terminal_ws/non_terminal_ws_raw
         for (i, p) in enumerate(bp_particles)
             isterminal(pomdp, p) && continue
             bp_weights[i] *= normalizing_factor
         end
-    elseif isdepleted
-        w = n_nt/N * non_terminal_ws
-        for (i,s) in enumerate(bp_particles)
-            isterminal(pomdp, s) && continue
-            bp_weights[i] = w
-        end
-        fill!(bp_weights, inv(N))
     end
 
     if resample && !allterminal

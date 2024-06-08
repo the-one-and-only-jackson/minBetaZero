@@ -20,7 +20,8 @@ struct GuidedTree{S,A,O}
     b_rewards::PV{Float64}# Map b' node index to immediate reward associated with trajectory bao where b' = τ(bao)
     b_ntprob::PV{Float64} # Map b' node index to proportion of non-terminal states before resampling
     b_V::PV{Float32} # Map b' node index to estimated value (i.e. from network)
-    b_P::PV{Vector{Float32}} # Map b' node index to estimated value (i.e. from network)
+    b_P::PV{Vector{Float32}} # Map b' node index to policy
+    b_logits::PV{Vector{Float32}} # Map b' node index to policy logits
 
     bao_children::Dict{Tuple{Int,O},Int} # (ba_idx,O) => bp_idx
     ba_children::NPV{Int} # ba_idx => [bp_idx, bp_idx, bp_idx, ...]
@@ -37,6 +38,7 @@ struct GuidedTree{S,A,O}
             PushVector{Float64}(sz),
             PushVector{Float32}(sz),
             PushVector{Vector{Float32}}(sz),
+            PushVector{Vector{Float32}}(sz),
 
             sizehint!(Dict{Tuple{Int,O},Int}(), check_repeat_obs ? sz : 0),
             NestedPushVector{Int}(na, sz),
@@ -52,11 +54,11 @@ function insert_belief!(
     r::Float64, 
     nt_prob::Float64, 
     V::Float32, 
-    P::Vector{Float32},
+    logits::Vector{Float32},
     check_repeat_obs::Bool
     ) where {S,A,O}
     
-    bp_idx = _insert_belief!(tree, bp, V, P, r, nt_prob)
+    bp_idx = _insert_belief!(tree, bp, V, logits, r, nt_prob)
     push!(tree.ba_children[ba_idx], bp_idx)
 
     if check_repeat_obs
@@ -70,19 +72,23 @@ function _insert_belief!(
     tree::GuidedTree{S,A,O}, 
     b::PFTBelief{S}, 
     V::Float32,
-    P::Vector{Float32},
+    logits::Vector{Float32},
     r::Float64 = 0.0,
     nt_prob::Float64 = 1.0
     ) where {S,A,O}
 
     b_idx = length(tree.b)+1
+
     push!(tree.b, b)
     push!(tree.Nh, 0)
     push!(tree.b_rewards, r)
     push!(tree.b_ntprob, nt_prob)
     push!(tree.b_V, V)
-    push!(tree.b_P, P)
+    push!(tree.b_logits, logits)
+    push!(tree.b_P, softmax(logits))
+    
     freenext!(tree.b_children)
+
     return b_idx
 end
 
@@ -90,7 +96,7 @@ function insert_root!(
     tree::GuidedTree{S,A}, 
     b::PFTBelief{S},
     V::Float32,
-    P::Vector{Float32}
+    logits::Vector{Float32}
     ) where {S,A}
 
     empty!(tree.Nh)
@@ -104,8 +110,9 @@ function insert_root!(
     empty!(tree.b_ntprob)
     empty!(tree.b_V)
     empty!(tree.b_P)
+    empty!(tree.b_logits)
 
-    _insert_belief!(tree, b, V, P)
+    _insert_belief!(tree, b, V, logits)
 end
 
 function insert_action!(

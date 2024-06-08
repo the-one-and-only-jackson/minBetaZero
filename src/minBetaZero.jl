@@ -53,6 +53,7 @@ include("tools.jl")
     buff_cap = 10_000
     n_particles = 500
     use_belief_reward = true
+    use_gumbel_target = true
     train_intensity = 4
     warmup_steps = buff_cap ÷ train_intensity
 end
@@ -90,6 +91,8 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         :episodes => Int[],
         :returns => Float64[],
         :returns_error => Float64[],
+        :network_returns => Float64[],
+        :network_returns_error => Float64[],
         :training => Dict[]
     )
 
@@ -112,12 +115,10 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         episodes = length(returns)
         returns_mean = mean(returns)
         returns_error = std(returns)/sqrt(length(returns))
-
         push!.(
             (info[:steps], info[:episodes], info[:returns], info[:returns_error]), 
             (steps, episodes, returns_mean, returns_error)
         )
-
         _rm = round(returns_mean; sigdigits=1+Base.hidigit(returns_mean,10)-Base.hidigit(returns_error,10))
         _re = round(returns_error; sigdigits=1)
         @info "Mean return $_rm +/- $_re"
@@ -126,6 +127,10 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
         net_results = test_network(net, pomdp, params; n_episodes=100)
         returns_mean = mean(net_results)
         returns_error = std(net_results)/sqrt(length(net_results))
+        push!.(
+            (info[:network_returns], info[:network_returns_error]),
+            (returns_mean, returns_error)
+        )
         _rm = round(returns_mean; sigdigits=1+Base.hidigit(returns_mean,10)-Base.hidigit(returns_error,10))
         _re = round(returns_error; sigdigits=1)
         @info "Network mean return $_rm +/- $_re"
@@ -359,7 +364,9 @@ end
 
 
 function work_fun(pomdp, planner, params)
-    (; t_max, n_particles, use_belief_reward) = params
+    (; t_max, n_particles, use_belief_reward, use_gumbel_target) = params
+
+    use_gumbel_target = use_gumbel_target && isa(planner, GumbelPlanner)
 
     up = BootstrapFilter(pomdp, n_particles)
     b = initialize_belief(up, initialstate(pomdp))
@@ -367,15 +374,20 @@ function work_fun(pomdp, planner, params)
 
     b_vec = []
     aid_vec = Int[]
+    gumbel_target_vec = Vector[]
     state_reward = Float32[]
     belief_reward = Float32[]
 
     for _ in 1:t_max
-        a = action(planner, b)
+        a, a_info = action_info(planner, b)
         aid = actionindex(pomdp, a)
         s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
 
         push!.((b_vec, aid_vec, state_reward), (b, aid, r))
+
+        if use_gumbel_target
+            push!(gumbel_target_vec, a_info.policy_target)
+        end
 
         if use_belief_reward
             br = 0f0
@@ -384,12 +396,12 @@ function work_fun(pomdp, planner, params)
             end
             push!(belief_reward, br)
         end
-
-        b = POMDPs.update(up, b, a, o)
         
         if isterminal(pomdp, s)
             break
         end
+
+        b = POMDPs.update(up, b, a, o)
     end
 
     gamma = discount(pomdp)
@@ -406,10 +418,16 @@ function work_fun(pomdp, planner, params)
 
     output_reward = use_belief_reward ? belief_reward : state_reward
 
+    if use_gumbel_target
+        policy_target = reduce(hcat, gumbel_target_vec)
+    else
+        policy_target = Flux.onehotbatch(aid_vec, 1:length(actions(pomdp)))
+    end
+
     data = (; 
         network_input = stack(input_representation, b_vec), 
         value_target  = reshape(output_reward, 1, :), 
-        policy_target = Flux.onehotbatch(aid_vec, 1:length(actions(pomdp))), 
+        policy_target = policy_target, 
         returns       = state_reward[1]
     )
 
