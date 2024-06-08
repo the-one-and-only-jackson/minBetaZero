@@ -22,8 +22,8 @@ Base.@kwdef struct GumbelSolver{RNG<:AbstractRNG, DA, F} <: Solver
     alpha_o::Float64        = 0.0 # Observation Progressive widening parameter
     rng::RNG                = Random.default_rng()
     check_repeat_obs::Bool  = true
-    beliefcache_size::Int   = 1_000
-    treecache_size::Int     = 1_000
+    beliefcache_size::Int   = 1 + tree_queries
+    treecache_size::Int     = 1 + tree_queries
     default_action::DA      = (pomdp::POMDP, ::Any) -> rand(rng, actions(pomdp))
     resample::Bool          = true
     cscale::Float64         = 1.
@@ -86,17 +86,52 @@ function POMDPTools.action_info(planner::GumbelPlanner, b)
     t0 = time()
 
     (; tree, cache, sol, pomdp, ordered_actions, live_actions) = planner
-    (; max_time, tree_queries, default_action, m_acts_init) = sol
+    (; rng, n_particles, default_action) = sol
 
     free!(cache)
 
-    initialize_root!(planner, b)
-    dN = tree_queries/(ceil(log2(m_acts_init)) * nextpow(2,m_acts_init))
-    Ntarget = floor(Int, dN)
-    ktarget = 1
+    s, w = gen_empty_belief(cache, n_particles)
+    particle_b = initialize_belief!(rng, s, w, pomdp, b)
 
-    iter = 0
-    while (time()-t0 < max_time) && (iter < tree_queries)
+    n_iter = _GumbelMCTS_main(planner, t0, particle_b)
+
+    if isempty(first(tree.b_children))
+        @warn "Taking random action"
+        a = default_action(pomdp, b)
+    else
+        idxs = findall(live_actions)
+        if length(idxs) == 1
+            a = ordered_actions[idxs[1]]
+        else
+            @warn "Multiple live actions found. This functionality is not yet implemented"
+            a = ordered_actions[idxs[1]]
+        end 
+    end
+
+    Q_root = Dict(ordered_actions[ai]=>tree.Qha[ba_idx] for (ai, ba_idx) in tree.b_children[1])
+    N_root = Dict(ordered_actions[ai]=>tree.Nha[ba_idx] for (ai, ba_idx) in tree.b_children[1])
+
+    time = time() - to
+
+    info = (n_iter, tree, time, Q_root, N_root)
+
+    return a, info
+end
+
+function _GumbelMCTS_main(planner::GumbelPlanner, t0, particle_b)
+    (; sol, live_actions) = planner
+    (; max_time, tree_queries, m_acts_init) = sol
+
+    initialize_root!(planner, particle_b)
+
+    dN = tree_queries/(ceil(log2(m_acts_init)) * nextpow(2,m_acts_init))
+    ktarget = 1
+    Ntarget = floor(Int, dN)
+
+    t_max = t0 + max_time
+    for iter in 1:tree_queries
+        (time() >= t_max) && return iter - 1
+
         sra = select_root_action(planner, Ntarget)
         if isnothing(sra)
             ktarget *= 2
@@ -111,36 +146,14 @@ function POMDPTools.action_info(planner::GumbelPlanner, b)
         a, ba_idx = sra
 
         mcts_main(planner, 1, a, ba_idx, 0)
-
-        iter += 1
     end
 
-    if isempty(first(tree.b_children))
-        @warn "Taking random action"
-        a = default_action(pomdp, b)
-    else
-        a = ordered_actions[findfirst(live_actions)]
-    end
-
-    info = (
-        n_iter = iter,
-        tree   = tree,
-        time   = time() - t0,
-        Q_root = Dict(ordered_actions[ai]=>tree.Qha[ba_idx] for (ai, ba_idx) in tree.b_children[1]),
-        N_root = Dict(ordered_actions[ai]=>tree.Nha[ba_idx] for (ai, ba_idx) in tree.b_children[1])
-    )
-
-    return a, info
+    return tree_queries
 end
 
-function initialize_root!(planner, b)
-    (; tree, cache, sol, pomdp, live_actions, noisy_logits) = planner
-    (; rng, n_particles, getpolicyvalue, m_acts_init, stochastic_root) = sol
-
-    s, w = gen_empty_belief(cache, n_particles)
-    particle_b = initialize_belief!(rng, s, w, pomdp, b)
-
-    na = length(actions(pomdp))
+function initialize_root!(planner::GumbelPlanner, particle_b)
+    (; tree, sol, live_actions, noisy_logits) = planner
+    (; rng, getpolicyvalue, m_acts_init, stochastic_root) = sol
 
     pv = getpolicyvalue(particle_b)
     P = pv.policy
