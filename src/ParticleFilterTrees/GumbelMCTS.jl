@@ -104,6 +104,12 @@ function POMDPTools.action_info(planner::GumbelPlanner, b)
     s, w = gen_empty_belief(cache, n_particles)
     particle_b = initialize_belief!(rng, s, w, pomdp, b)
 
+    if iszero(particle_b.non_terminal_ws)
+        a = default_action(pomdp, b)
+        info = (; n_iter = 0, tree = nothing, time = time() - t0, Q_root = nothing, N_root = nothing, policy_target = nothing)
+        return a, info
+    end
+
     n_iter = GumbelMCTS_main(planner, t0, particle_b)
 
     if isempty(first(tree.b_children))
@@ -150,7 +156,7 @@ function select_best_action(planner::GumbelPlanner)
 end
 
 function GumbelMCTS_main(planner::GumbelPlanner, t0, particle_b)
-    (; sol, target_N, ordered_actions) = planner
+    (; sol, target_N, ordered_actions, tree) = planner
     (; max_time, tree_queries) = sol
 
     initialize_root!(planner, particle_b)
@@ -171,6 +177,7 @@ function GumbelMCTS_main(planner::GumbelPlanner, t0, particle_b)
 end
 
 function mcts_main(planner::GumbelPlanner, b_idx::Int)
+    @assert b_idx != 1
     opt_a, opt_ba_idx = select_nonroot_action(planner, b_idx)
     mcts_main(planner, b_idx, opt_a, opt_ba_idx)
 end
@@ -192,14 +199,15 @@ function mcts_main(planner::GumbelPlanner, b_idx::Int, a, ba_idx::Int)
     
         if check_repeat_obs && haskey(tree.bao_children, (ba_idx, o))
             bp_idx = tree.bao_children[(ba_idx,o)]
+            @assert b_idx != 1
             push!(tree.ba_children[ba_idx], bp_idx)
             Vp = mcts_main(planner, bp_idx)
         else
             bp_idx, Vp = insert_new_belief!(planner, b, ba_idx, a, o, p_idx, sample_sp, sample_r)
+            @assert bp_idx != 1
         end
     else
-        bp_idx = argmin(tree.Nh[_bp_idx] for _bp_idx in tree.ba_children[ba_idx])
-        # bp_idx = rand(rng, tree.ba_children[ba_idx])
+        bp_idx = argmin(_bp_idx -> tree.Nh[_bp_idx], tree.ba_children[ba_idx])
         Vp = mcts_main(planner, bp_idx)
     end
 
@@ -267,28 +275,36 @@ end
 function select_root_action(planner::GumbelPlanner)
     (; tree, live_actions, target_N) = planner
 
-    ai, ba_idx = _select_root_action(tree, live_actions, target_N.N)
+    halving_flag = true
+    for (ai, ba_idx) in tree.b_children[1]
+        if live_actions[ai] && tree.Nha[ba_idx] < target_N.N
+            halving_flag = false
+            break
+        end
+    end
 
-    if ai == 0
+    if halving_flag
         next!(target_N)
         if count(live_actions) > 2
             reduce_root_actions(planner)
-            @assert count(live_actions) >= 2 "Should not have less than 2 live actions at root. $target_N"
         end
-    
-        ai, ba_idx = _select_root_action(tree, live_actions, target_N.N)  
     end
 
-    return ai, ba_idx
+    return _select_root_action(tree, live_actions)
 end
 
-function _select_root_action(tree::GuidedTree, live_actions::AbstractVector{Bool}, Nmax::Int)
+function _select_root_action(tree::GuidedTree, live_actions::AbstractVector{Bool})
+    Nmax = typemax(Int)
+    ai_opt = 0
+    ba_idx_opt = 0
     for (ai, ba_idx) in tree.b_children[1]
         if live_actions[ai] && tree.Nha[ba_idx] < Nmax
-            return (ai, ba_idx)
+            Nmax = tree.Nha[ba_idx]
+            ai_opt = ai
+            ba_idx_opt = ba_idx
         end
     end
-    return (0, 0)
+    return (ai_opt, ba_idx_opt)
 end
 
 function reduce_root_actions(planner::GumbelPlanner)
@@ -349,6 +365,7 @@ function improved_policy(planner::GumbelPlanner, b_idx::Int)
     for (ai, ba_idx) in tree.b_children[b_idx]
         new_logits[ai] += sigma * (tree.Qha[ba_idx] - v_mix)
     end
+
     pi_completed = softmax!(new_logits)
 
     return pi_completed

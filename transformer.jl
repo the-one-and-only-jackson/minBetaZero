@@ -21,13 +21,13 @@ struct RMSNorm{S, B}
     bias::B
 end
 RMSNorm(d; bias=true) = RMSNorm(ones(Float32,d), bias ? zeros(Float32,d) : false)
-(block::RMSNorm)(x) = block.scale .* x .* sqrt.(size(x,1) ./ sum(abs2, x; dims=1)) .+ block.bias
+(block::RMSNorm)(x) = block.scale .* x .* sqrt.(size(x,1) ./ (sum(abs2, x; dims=1) .+ eps(eltype(x)))) .+ block.bias
 Flux.@layer :expand RMSNorm
 
 function Flux.ChainRulesCore.rrule(block::T, x) where {T<:RMSNorm}
     d = size(x,1)
 
-    dot_xx = sum(abs2, x; dims=1)
+    dot_xx = sum(abs2, x; dims=1) .+ eps(eltype(x))
     inv_rms = sqrt.(d ./ dot_xx)
     out_1 = x .* inv_rms
     out_2 = block.scale .* out_1 .+ block.bias

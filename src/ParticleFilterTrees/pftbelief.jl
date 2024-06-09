@@ -26,6 +26,7 @@ function Random.rand(rng::AbstractRNG, sampler::Random.SamplerTrivial{<:PFTBelie
 end
 
 function non_terminal_sample(rng::AbstractRNG, pomdp::POMDP, b::PFTBelief)
+    @assert b.non_terminal_ws > eps()
     t = rand(rng) * b.non_terminal_ws
     N = n_particles(b)
     i = 1
@@ -99,18 +100,17 @@ function initialize_belief!(
     perm = randperm(rng, n_particles(b))
     j = 1
     for i in eachindex(s)
-        s[i] = particle(b, perm[j])
-        j = mod1(j+1, n_particles(b))
-
-        k = 1
-        while isterminal(pomdp, s[i])
+        for k in 1:n_particles(b)
             s[i] = particle(b, perm[j])
             j = mod1(j+1, n_particles(b))
-            k += 1
-            if k > n_particles(b)
-                @warn "All particles are terminal" maxlog=1
-                rand!(rng, s, b)
-                return PFTBelief(s, w, 1.0)
+
+            if !isterminal(pomdp, s[i])
+                break
+            end
+
+            if k == n_particles(b)
+                @warn "All particles at root are terminal"
+                return PFTBelief(s, w, 0.0)
             end
         end
     end

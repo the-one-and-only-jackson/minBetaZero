@@ -1,6 +1,6 @@
 using Distributed
 
-addprocs(10)
+# addprocs(20)
 
 @everywhere begin
     using minBetaZero
@@ -10,7 +10,6 @@ addprocs(10)
     using Flux
     using Statistics
 end
-
 
 @everywhere include("models/LightDark.jl")
 @everywhere using .LightDark
@@ -24,6 +23,37 @@ end
 
 include("testtools.jl")
 
+@everywhere include("cgf.jl")
+
+@everywhere include("transformer.jl")
+
+function local_SetTransformer(params::TransformerParams; induced=true)
+    embed = [Dense(params.d_in=>params.d)]
+    if induced
+        encoder = [InducedAttBlock(params.k_enc, params) for _ in 1:params.n_enc]
+    else
+        encoder = [SelfAttBlock(params) for _ in 1:params.n_enc]
+    end
+    decoder = [LearnedQuerriesBlock(params.k_dec, params)]
+    output = Any[]
+    params.prenorm && pushfirst!(output, params.norm(params.d))
+    Chain(embed..., encoder..., decoder..., output...)
+end
+
+lightdark_st() = Chain(
+    x->reshape(x, size(x,1), size(x,2), :),
+    local_SetTransformer(TransformerParams(; 
+        d_in = 1,
+        d = 64, # d = dout because this is a shared layer
+        dropout = 0.1,
+        n_enc = 2,
+        n_dec = 1,
+        k_enc = 4,
+        k_dec = 2,
+    ); induced=false),
+    x->(selectdim(x,2,1), selectdim(x,2,2))
+)
+
 
 
 
@@ -32,75 +62,78 @@ include("testtools.jl")
 p1 = plot(ylabel="MCTS Return", title="Mean Episodic Return", ylims=(-5,20), legend=:bottomright)
 p2 = plot(ylabel="Network Return", xlabel="Episodes", ylims=(-5,20), legend=:bottomright)
 
-for br in [true, false]
-    params = minBetaZeroParameters(
-        GumbelSolver_args = (;
-            n_particles         = 100,
-            tree_queries        = 40,
-            k_o                 = 20.,
-            check_repeat_obs    = false,
-            resample            = true,
-            m_acts_init         = 3,
-            cscale              = 1.0,
-            cvisit              = 50.
-        ),
-        t_max           = 50,
-        n_episodes      = 100,
-        n_iter          = 30,
-        batchsize       = 128,
-        lr              = 3e-4,
-        lambda          = 1e-3,
-        plot_training   = false,
-        train_device    = gpu,
-        inference_device = gpu,
-        buff_cap = 5_000,
-        train_intensity = 8,
-        warmup_steps = 1_000,
-        input_dims = (1,),
-        use_belief_reward = true,
-        use_gumbel_target = true
-    )
+params = minBetaZeroParameters(
+    GumbelSolver_args = (;
+        tree_queries        = 40,
+        k_o                 = 20.,
+        check_repeat_obs    = false,
+        resample            = true,
+        cscale              = 1.0,
+        cvisit              = 50.,
+        n_particles         = 100,
+        m_acts_init         = 3    
+    ),
+    t_max           = 50,
+    n_episodes      = 100,
+    n_iter          = 30,
+    batchsize       = 128,
+    lr              = 3e-4,
+    value_scale     = 0.5,
+    lambda          = 1e-3,
+    plot_training   = true,
+    train_on_planning_b = true,
+    n_particles = 1_000,
+    n_planning_particles = 100,
+    train_device    = gpu,
+    buff_cap = 10_000,
+    warmup_steps = 500,
+    train_intensity = 8,
+    input_dims = (1,),
+    na = 3,
+    use_belief_reward = true,
+    use_gumbel_target = true
+)
 
-    nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
-        action_size         = 3,
-        input_size          = (1,),
-        critic_loss         = Flux.Losses.logitcrossentropy,
-        critic_categories   = collect(-100:10:100),
-        p_dropout           = 0.1,
-        neurons             = 256,
-        hidden_layers       = 2,
-        shared_net          = mean_std_layer,
-        shared_out_size     = (2,) # must manually set... fix at a later date...        
-    )
+nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
+    action_size         = 3,
+    input_size          = (1,),
+    critic_loss         = Flux.Losses.logitcrossentropy,
+    critic_categories   = collect(-100:10:100),
+    p_dropout           = 0.1,
+    neurons             = 256,
+    hidden_layers       = 2,
+    shared_net          = mean_std_layer, # Chain(x->clamp.((x .- 5) ./ 2, -10, 10), lightdark_st()), # CGF(1=>64), # mean_std_layer,
+    shared_out_size     = (2,) # must manually set... fix at a later date...        
+)
 
-    results = []
-    for _ in 1:10
-        @time net, info = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params));
+results = []
+for _ in 1:3
+    @time net, info = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params));
 
-        plot(
-            plot(info[:steps], info[:returns]; label=false, xlabel="Steps", title="Mean Episodic Return"),
-            plot(info[:episodes], info[:returns]; label=false, xlabel="Episodes");
-            layout=(2,1)
-        ) # |> display
+    plot(
+        plot(info[:steps], info[:returns]; label=false, xlabel="Steps", title="Mean Episodic Return"),
+        plot(info[:episodes], info[:returns]; label=false, xlabel="Episodes");
+        layout=(2,1)
+    ) |> display
 
-        push!(results, (net, info))
-    end
-
-
-    label = "br = $br"
-
-    x = results[1][2][:episodes]
-
-    y = stack(x->x[2][:returns], results)
-    mu, bounds = ci_bounds(y)
-    error_plot!(p1, x, mu, bounds; label)
-
-    y = stack(x->x[2][:network_returns], results)
-    mu, bounds = ci_bounds(y)
-    error_plot!(p2, x, mu, bounds; label)
-
-    plot(p1, p2; layout=(2,1)) |> display
+    push!(results, (net, info))
 end
+
+
+label = "shared = cgf"
+
+x = results[1][2][:episodes]
+
+y = stack(x->x[2][:returns], results)
+mu, bounds = ci_bounds(y)
+error_plot!(p1, x, mu, bounds; label)
+
+y = stack(x->x[2][:network_returns], results)
+mu, bounds = ci_bounds(y)
+error_plot!(p2, x, mu, bounds; label)
+
+plot(p1, p2; layout=(2,1)) |> display
+
 
 # p = plot(xlabel="Episodes", title="Mean Episodic Return - $(params.buff_cap) Buffer - $(params.n_episodes) Episodes")
 # for (_, info) in results
@@ -109,8 +142,32 @@ end
 # p
 
 
+pomdp = LightDarkPOMDP()
+net = ActorCritic(nn_params)
+n_particles = 1_000
 
+up = BootstrapFilter(pomdp, n_particles)
+b = initialize_belief(up, initialstate(pomdp))
+s = rand(initialstate(pomdp))
 
+b_vec = []
+aid_vec = Int[]
+gumbel_target_vec = Vector[]
+state_reward = Float32[]
+belief_reward = Float32[]
+
+getpolicyvalue = minBetaZero.getpolicyvalue_cpu(net)
+solver = GumbelSolver(; getpolicyvalue, params.GumbelSolver_args...)
+planner = solve(solver, pomdp)
+
+b_perm = randperm(n_particles)[1:100]
+b_querry = ParticleCollection(particles(b)[b_perm])
+a, a_info = action_info(planner, b_querry)
+aid = actionindex(pomdp, a)
+s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
+b = update(up, b, a, o)
+
+a_info.tree.b_V
 
 
 

@@ -110,6 +110,7 @@ function DiscreteActor(nn_params::NetworkParameters)
 end
 
 function (actor::DiscreteActor)(x; logits=false) 
+    @assert all(isfinite, x)
     out = logits ? actor.net(x) : softmax(actor.net(x); dims=1)
     @assert all(isfinite, out)
     return out
@@ -170,10 +171,11 @@ function Critic(nn_params::NetworkParameters)
 end
 
 function (critic::Critic)(x)
+    @assert all(isfinite, x)
     net_out = x |> critic.net
     nominal_value = size(net_out, 1) == 1 ? net_out : critic.categories' * softmax(net_out; dims=1)
     out = nominal_value |> critic.output_transform
-    @assert all(isfinite, net_out)
+    @assert all(isfinite, net_out) "$x"
     @assert all(isfinite, nominal_value)
     @assert all(isfinite, out)
     return out
