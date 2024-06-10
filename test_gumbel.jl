@@ -1,6 +1,6 @@
 using Distributed
 
-# addprocs(20)
+# addprocs(10)
 
 @everywhere begin
     using minBetaZero
@@ -59,80 +59,80 @@ lightdark_st() = Chain(
 
 # do multiple epochs and checkpointing
 
-p1 = plot(ylabel="MCTS Return", title="Mean Episodic Return", ylims=(-5,20), legend=:bottomright)
+p1 = plot(ylabel="MCTS Return", title="Mean Episodic Return", ylims=(0,18), legend=:bottomright, xlabel="Episodes", xlims=(0, 5_000), right_margin=4Plots.mm)
 p2 = plot(ylabel="Network Return", xlabel="Episodes", ylims=(-5,20), legend=:bottomright)
 
-params = minBetaZeroParameters(
-    GumbelSolver_args = (;
-        tree_queries        = 40,
-        k_o                 = 20.,
-        check_repeat_obs    = false,
-        resample            = true,
-        cscale              = 1.0,
-        cvisit              = 50.,
-        n_particles         = 100,
-        m_acts_init         = 3    
-    ),
-    t_max           = 50,
-    n_episodes      = 100,
-    n_iter          = 30,
-    batchsize       = 128,
-    lr              = 3e-4,
-    value_scale     = 0.5,
-    lambda          = 1e-3,
-    plot_training   = true,
-    train_on_planning_b = true,
-    n_particles = 1_000,
-    n_planning_particles = 100,
-    train_device    = gpu,
-    buff_cap = 10_000,
-    warmup_steps = 500,
-    train_intensity = 8,
-    input_dims = (1,),
-    na = 3,
-    use_belief_reward = true,
-    use_gumbel_target = true
-)
+for n_episodes in [500, 100], train_intensity in [8, 4]
+    params = minBetaZeroParameters(
+        GumbelSolver_args = (;
+            tree_queries        = 40,
+            k_o                 = 20.,
+            check_repeat_obs    = false,
+            resample            = true,
+            cscale              = 1.0,
+            cvisit              = 50.,
+            n_particles         = 100,
+            m_acts_init         = 3    
+        ),
+        t_max           = 50,
+        n_episodes      = n_episodes,
+        inference_batchsize = 32,
+        n_iter          = 5_000 ÷ n_episodes,
+        batchsize       = 128,
+        lr              = 3e-4,
+        value_scale     = 1.0,
+        lambda          = 1e-3,
+        plot_training   = false,
+        train_on_planning_b = true,
+        n_particles = 1_000,
+        n_planning_particles = 100,
+        train_device    = gpu,
+        train_intensity = train_intensity,
+        input_dims = (1,),
+        na = 3,
+        use_belief_reward = true,
+        use_gumbel_target = true,
+        on_policy = true
+    )
 
-nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
-    action_size         = 3,
-    input_size          = (1,),
-    critic_loss         = Flux.Losses.logitcrossentropy,
-    critic_categories   = collect(-100:10:100),
-    p_dropout           = 0.1,
-    neurons             = 256,
-    hidden_layers       = 2,
-    shared_net          = mean_std_layer, # Chain(x->clamp.((x .- 5) ./ 2, -10, 10), lightdark_st()), # CGF(1=>64), # mean_std_layer,
-    shared_out_size     = (2,) # must manually set... fix at a later date...        
-)
+    nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
+        action_size         = 3,
+        input_size          = (1,),
+        critic_loss         = Flux.Losses.logitcrossentropy,
+        critic_categories   = collect(-100:10:100),
+        p_dropout           = 0.1,
+        neurons             = 256,
+        hidden_layers       = 1,
+        shared_net          = Chain(Flux.Scale(1), lightdark_st()), # Chain(x->clamp.((x .- 5) ./ 2, -10, 10), lightdark_st()), # CGF(1=>64), # mean_std_layer,
+        shared_out_size     = (64,2) # must manually set... fix at a later date...        
+    )
 
-results = []
-for _ in 1:3
-    @time net, info = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params));
+    results = []
+    for _ in 1:3
+        @time net, info = betazero(params, LightDarkPOMDP(), ActorCritic(nn_params));
 
-    plot(
-        plot(info[:steps], info[:returns]; label=false, xlabel="Steps", title="Mean Episodic Return"),
-        plot(info[:episodes], info[:returns]; label=false, xlabel="Episodes");
-        layout=(2,1)
-    ) |> display
+        plot(
+            plot(info[:steps], info[:returns]; label=false, xlabel="Steps", title="Mean Episodic Return"),
+            plot(info[:episodes], info[:returns]; label=false, xlabel="Episodes");
+            layout=(2,1)
+        ) |> display
 
-    push!(results, (net, info))
+        push!(results, (net, info))
+    end 
+
+
+    label = "$n_episodes ep / itr at inten $train_intensity"
+
+    x = results[1][2][:episodes] .- first(results[1][2][:episodes])
+
+    y = stack(x->x[2][:returns], results)
+    mu, bounds = ci_bounds(y)
+    error_plot!(p1, x, mu, bounds; label)
+
+    plot(p1) |> display
+    savefig("figures/lightdark_transformer.png")
 end
 
-
-label = "shared = cgf"
-
-x = results[1][2][:episodes]
-
-y = stack(x->x[2][:returns], results)
-mu, bounds = ci_bounds(y)
-error_plot!(p1, x, mu, bounds; label)
-
-y = stack(x->x[2][:network_returns], results)
-mu, bounds = ci_bounds(y)
-error_plot!(p2, x, mu, bounds; label)
-
-plot(p1, p2; layout=(2,1)) |> display
 
 
 # p = plot(xlabel="Episodes", title="Mean Episodic Return - $(params.buff_cap) Buffer - $(params.n_episodes) Episodes")
@@ -200,7 +200,7 @@ params = minBetaZeroParameters(
     t_max           = 50,
     n_episodes      = 40,
     n_iter          = 500,
-    batchsize       = 128,
+    batchsize       = 256,
     lr              = 3e-4,
     lambda          = 0.0,
     plot_training   = false,
