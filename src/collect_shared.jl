@@ -87,21 +87,19 @@ function work_fun(pomdp, planner, params)
 
         bp = POMDPs.update(up, b, a, o)
 
-        for p in particles(bp)
-            if isterminal(pomdp, p)
-                b_counts = [length(unique(particles(b))) for b in b_vec]
-                str1 = """
-                P counts: $b_counts,
-                B: $(unique(particles(b))), 
-                BP: $(unique(particles(bp))),
-                step_num: $step_num,
-                o: $o, 
-                s: $s, 
-                sp: $sp, 
-                """
-                println(str1)
-                @assert false
+        if any(isterminal(pomdp, p) for p in particles(bp))
+            @warn "Terminal particle in belief!"
+
+            for t in 1:t_max-step_num
+                a = rand(actions(pomdp))
+                sp, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
+                state_reward[end] += discount(pomdp)^t * r
+                if isterminal(pomdp, sp)
+                    break
+                end
+                s = sp
             end
+            break
         end
 
         s = sp

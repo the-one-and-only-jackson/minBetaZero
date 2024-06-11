@@ -29,10 +29,16 @@ function gen_data_threaded(pomdp::POMDP, net, params::minBetaZeroParameters, buf
     (; n_episodes, GumbelSolver_args, na, input_dims, inference_batchsize) = params
     
     @sync begin
-        storage_channel = Channel(n_episodes)
-        # data_task = Threads.@spawn collect_data(buffer, storage_channel, n_episodes)
-        # bind(storage_channel, data_task)
-        # errormonitor(data_task)
+        progress = Progress(n_episodes)
+        results_channel = Channel(n_episodes)
+    
+        progresstaskref = Ref{Task}()
+        storage_channel = Channel(n_episodes; spawn=true, taskref=progresstaskref, threadpool=:interactive) do ch
+            for _ in 1:n_episodes
+                put!(results_channel, take!(ch))
+                next!(progress)
+            end
+        end
     
         querry_ch = Channel(n_episodes)
 
@@ -40,36 +46,41 @@ function gen_data_threaded(pomdp::POMDP, net, params::minBetaZeroParameters, buf
         
         net = LockedNetwork(gpu(net))
         sz = (input_dims..., GumbelSolver_args.n_particles)
-        gpu_tasks = Vector{Task}(undef,2)
-        for i in 1:2
-            gpu_tasks[i] = Threads.@spawn gpu_worker(querry_ch, net; sz, na, batchsize=inference_batchsize)
-            errormonitor(gpu_tasks[i])
-        end
-
-        progress = Progress(n_episodes)
-        ret_vec = zeros(Float32, n_episodes)
-        steps = 0
-    
-        for i in 1:n_episodes
-            data = take!(storage_channel)
-            steps += length(data.value_target)
-            set_buffer!(
-                buffer; 
-                network_input = data.network_input, 
-                value_target  = data.value_target, 
-                policy_target = data.policy_target
-            )
-            ret_vec[i] = data.returns
-            next!(progress)
-        end
+        batchsize = inference_batchsize
         
-        close(storage_channel)
+        gpu_tasks = Threads.@spawn gpu_worker(querry_ch, net; sz, na, batchsize)
+        errormonitor(gpu_tasks)
+
+        # gpu_tasks = Vector{Task}(undef,2)
+        # for i in 1:2
+        #     gpu_tasks[i] = Threads.@spawn gpu_worker(querry_ch, net; sz, na, batchsize)
+        #     errormonitor(gpu_tasks[i])
+        # end
 
         wait.(worker_tasks)
         close(querry_ch)
 
-        return ret_vec, steps
+        wait(progresstaskref[])
+        ch_to_buff(results_channel, buffer, n_episodes)
     end
+end
+
+function ch_to_buff(results_channel, buffer, n_episodes)
+    ret_vec = zeros(Float32, n_episodes)
+    steps = 0
+    for i in 1:n_episodes
+        data = take!(results_channel)
+        steps += length(data.value_target)
+        set_buffer!(
+            buffer; 
+            network_input = data.network_input, 
+            value_target  = data.value_target, 
+            policy_target = data.policy_target
+        )
+        ret_vec[i] = data.returns
+    end
+    close(results_channel)
+    return ret_vec, steps
 end
 
 function threaded_worker(querry_ch::Channel, storage_channel::Channel, pomdp::POMDP, params::minBetaZeroParameters)
@@ -111,7 +122,7 @@ function gpu_worker(querry_ch::Channel, net; sz::Tuple, na::Int, batchsize::Int)
         try
             isready(querry_ch) || wait(querry_ch)
             _gpu_worker(querry_ch, net, Q)
-            GC.gc(false)
+            # GC.gc(false)
         catch e
             expected_exit = isa(e, InvalidStateException) && e.state === :closed
             expected_exit ? break : rethrow()

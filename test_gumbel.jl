@@ -1,6 +1,6 @@
 using Distributed
 
-# addprocs(10)
+addprocs(20)
 
 @everywhere begin
     using minBetaZero

@@ -36,7 +36,7 @@ end
     train_on_planning_b = true
     use_belief_reward   = true
     use_gumbel_target   = true
-    on_policy           = false
+    num_itr_stored      = 1
 
     GumbelSolver_args   = (;
         tree_queries        = 100,
@@ -55,7 +55,7 @@ end
     lambda          = 0.0
     plot_training   = false
     train_device    = cpu
-    buff_cap        = t_max * n_episodes
+    buff_cap        = t_max * n_episodes * num_itr_stored
     train_intensity = 8
     warmup_steps    = 0
 end
@@ -68,7 +68,7 @@ include("collect_distributed.jl")
 
 function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
     (; n_iter, input_dims, na, buff_cap, n_particles, n_planning_particles, 
-    train_on_planning_b, train_intensity, warmup_steps, on_policy) = params
+    train_on_planning_b, train_intensity, warmup_steps, num_itr_stored) = params
 
     @assert nworkers() > 1 || Threads.nthreads() > 1 """
     Error: Distributed computing is not available. 
@@ -93,7 +93,7 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
     for itr in 1:n_iter+1
         iter_timer = time()
 
-        on_policy && reset_buffer!(buffer)
+        (mod(itr-1, num_itr_stored) == 0) && reset_buffer!(buffer)
 
         @info itr <= n_iter ? "Gathering Data - Iteration: $itr" : "Gathering Data - Final Evaluation"
 
