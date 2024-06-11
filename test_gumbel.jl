@@ -55,7 +55,39 @@ lightdark_st() = Chain(
 )
 
 
+using CUDA
 
+function testfun()
+    x = randn(Float32, 1, 100, 32)
+    x = x |> gpu
+    net = lightdark_st()
+    net = net |> gpu
+    @benchmark $net($x)
+end
+
+math_mode = CUDA.PEDANTIC_MATH
+math_mode = CUDA.DEFAULT_MATH
+math_mode = CUDA.FAST_MATH
+
+precision = :Float16
+precision = :BFloat16
+precision = :TensorFloat32
+
+CUDA.math_mode!(math_mode; precision)
+testfun()
+
+x = cu(randn(500,500,32));
+y = cu(randn(500,500,32));
+z = cu(zeros(500,500,32));
+
+CUDA.math_mode!(CUDA.FAST_MATH; precision = :Float16)
+CUDA.@profile raw=true batched_mul!(z, x, y)
+
+CUDA.math_mode!(CUDA.DEFAULT_MATH; precision = :TensorFloat32)
+CUDA.@profile raw=true batched_mul!(z, x, y)
+
+CUDA.math_mode!(CUDA.PEDANTIC_MATH; precision = :TensorFloat32)
+CUDA.@profile raw=true batched_mul!(z, x, y)
 
 # do multiple epochs and checkpointing
 

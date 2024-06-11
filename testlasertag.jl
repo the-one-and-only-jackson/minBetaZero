@@ -7,9 +7,28 @@ using Flux
 using Statistics
 using Plots
 
-include("lasertag.jl")
+include("models/lasertag.jl")
+using .LaserTag
 
-actionindex(pomdp, actions(pomdp)[1])
+
+function test()
+    pomdp = DiscreteLaserTagPOMDP()
+
+    s = rand(initialstate(pomdp))
+    a = rand(actions(pomdp))
+
+    rng = Random.default_rng()
+
+    @time minBetaZero.ParticleFilterTrees.sr_gen(rng, pomdp, s, a)
+end
+test();
+
+P = typeof(pomdp)
+S = typeof(s)
+A = typeof(a)
+hasmethod(reward, Tuple{P,S,A,S})
+
+
 
 function minBetaZero.input_representation(b::AbstractParticleBelief{<:LTState})
     stack(y->convert(SVector{4, Int}, y), particles(b))

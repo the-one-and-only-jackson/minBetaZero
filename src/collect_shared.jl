@@ -53,7 +53,7 @@ function work_fun(pomdp, planner, params)
     state_reward = Float32[]
     belief_reward = Float32[]
 
-    for _ in 1:t_max
+    for step_num in 1:t_max
         if n_planning_particles == n_particles
             b_querry = b
         else
@@ -63,7 +63,7 @@ function work_fun(pomdp, planner, params)
         
         a, a_info = action_info(planner, b_querry)
         aid = actionindex(pomdp, a)
-        s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
+        sp, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
 
         b_target = train_on_planning_b ? b_querry : b
 
@@ -81,11 +81,31 @@ function work_fun(pomdp, planner, params)
             push!(belief_reward, br)
         end
         
-        if isterminal(pomdp, s)
+        if isterminal(pomdp, sp)
             break
         end
 
-        b = POMDPs.update(up, b, a, o)
+        bp = POMDPs.update(up, b, a, o)
+
+        for p in particles(bp)
+            if isterminal(pomdp, p)
+                b_counts = [length(unique(particles(b))) for b in b_vec]
+                str1 = """
+                P counts: $b_counts,
+                B: $(unique(particles(b))), 
+                BP: $(unique(particles(bp))),
+                step_num: $step_num,
+                o: $o, 
+                s: $s, 
+                sp: $sp, 
+                """
+                println(str1)
+                @assert false
+            end
+        end
+
+        s = sp
+        b = bp
     end
 
     gamma = discount(pomdp)

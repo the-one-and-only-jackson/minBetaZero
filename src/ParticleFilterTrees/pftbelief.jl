@@ -228,7 +228,7 @@ function GenBelief(
             bp_weights[i] = resample ? 0.0 : w
             terminal_ws += w
         else
-            bp_weights[i] = w * pdf(POMDPs.observation(pomdp, s, a, sp), o)    
+            bp_weights[i] = w * pdf(POMDPs.observation(pomdp, s, a, sp), o)
             non_terminal_ws_raw += bp_weights[i]
             n_nt += 1
         end    
@@ -262,7 +262,7 @@ function GenBelief(
 end
 
 function sr_gen(rng::AbstractRNG, pomdp::P, s::S, a::A) where {S,A,P<:POMDP{S,A}}
-    !hasmethod(reward, Tuple{P,S,A}) && return @gen(:sp,:r)(pomdp, s, a, rng)
+    hasmethod(reward, Tuple{P,S,A,S}) || return @gen(:sp,:r)(pomdp, s, a, rng)
 
     sp = rand(rng, transition(pomdp, s, a))
     r = reward(pomdp, s, a, sp)

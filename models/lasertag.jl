@@ -5,7 +5,7 @@
 
 module LaserTag
 
-using POMDPs, Random, StaticArrays, POMDPTools, POMDPModelTools
+using POMDPs, Random, StaticArrays, POMDPTools
 
 export LTState, LaserTagPOMDP, DiscreteLaserTagPOMDP
 
