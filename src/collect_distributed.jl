@@ -6,22 +6,31 @@ function gen_data_distributed(pomdp::POMDP, net, params::minBetaZeroParameters, 
     data_task = Threads.@spawn collect_data(buffer, storage_channel, n_episodes)
     errormonitor(data_task)
 
-    pmap(1:nworkers()) do worker_idx
+    # pmap(1:nworkers()) do worker_idx
+    #     getpolicyvalue = getpolicyvalue_cpu(net)
+    #     solver = GumbelSolver(; getpolicyvalue, GumbelSolver_args...)
+    #     planner = solve(solver, pomdp)
+
+    #     if worker_idx <= mod(n_episodes, nworkers())
+    #         n_episodes = n_episodes ÷ nworkers() + 1
+    #     else
+    #         n_episodes = n_episodes ÷ nworkers()
+    #     end
+
+    #     for _ in 1:n_episodes
+    #         data = work_fun(pomdp, planner, params)
+    #         put!(storage_channel, data)
+    #     end
+
+    #     return nothing
+    # end
+
+    pmap(1:n_episodes) do _
         getpolicyvalue = getpolicyvalue_cpu(net)
         solver = GumbelSolver(; getpolicyvalue, GumbelSolver_args...)
         planner = solve(solver, pomdp)
-
-        if worker_idx <= mod(n_episodes, nworkers())
-            n_episodes = n_episodes ÷ nworkers() + 1
-        else
-            n_episodes = n_episodes ÷ nworkers()
-        end
-
-        for _ in 1:n_episodes
-            data = work_fun(pomdp, planner, params)
-            put!(storage_channel, data)
-        end
-
+        data = work_fun(pomdp, planner, params)
+        put!(storage_channel, data)
         return nothing
     end
 

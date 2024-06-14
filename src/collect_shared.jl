@@ -63,7 +63,7 @@ function work_fun(pomdp, planner, params)
         
         a, a_info = action_info(planner, b_querry)
         aid = actionindex(pomdp, a)
-        sp, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
+        s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
 
         b_target = train_on_planning_b ? b_querry : b
 
@@ -81,29 +81,39 @@ function work_fun(pomdp, planner, params)
             push!(belief_reward, br)
         end
         
-        if isterminal(pomdp, sp)
+        if isterminal(pomdp, s)
             break
         end
 
-        bp = POMDPs.update(up, b, a, o)
+        b = myupdate(up, b, a, o)
 
-        if any(isterminal(pomdp, p) for p in particles(bp))
-            @warn "Terminal particle in belief!"
-
+        if isnothing(b) || any(isterminal(pomdp, p) for p in particles(b))
+            if isnothing(b)
+                @warn "Particle depletion - random rollout"
+            else
+                @warn "Terminal particle in belief - random rollout"
+            end
+            
             for t in 1:t_max-step_num
                 a = rand(actions(pomdp))
-                sp, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
+                s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
                 state_reward[end] += discount(pomdp)^t * r
-                if isterminal(pomdp, sp)
+                if use_belief_reward
+                    belief_reward[end] += discount(pomdp)^t * r
+                end
+                if isterminal(pomdp, s)
                     break
                 end
-                s = sp
             end
+
             break
         end
 
-        s = sp
-        b = bp
+        # if step_num == t_max
+        #     r = net(input_representation(b)).value[]
+        #     state_reward[end] += discount(pomdp) * r
+        #     belief_reward[end] += discount(pomdp) * r
+        # end
     end
 
     gamma = discount(pomdp)
@@ -134,4 +144,25 @@ function work_fun(pomdp, planner, params)
     )
 
     return data
+end
+
+
+function myupdate(up::BasicParticleFilter, b::ParticleCollection, a, o)
+    pm = up._particle_memory
+    wm = up._weight_memory
+    resize!(pm, n_particles(b))
+    resize!(wm, n_particles(b))
+    ParticleFilters.predict!(pm, up.predict_model, b, a, o, up.rng)
+    ParticleFilters.reweight!(wm, up.reweight_model, b, a, pm, o, up.rng)
+
+    w_sum = sum(wm)
+
+    return w_sum < eps() ? nothing : resample(
+        up.resampler,
+        WeightedParticleBelief(pm, wm, w_sum, nothing),
+        up.predict_model,
+        up.reweight_model,
+        b, a, o,
+        up.rng
+    )
 end

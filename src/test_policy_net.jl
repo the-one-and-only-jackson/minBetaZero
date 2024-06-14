@@ -28,7 +28,7 @@ end
 
 function distributed_test_network(net, pomdp::POMDP, params::minBetaZeroParameters; n_episodes=500, policy=netPolicyStoch)
     ret_vec = pmap(1:n_episodes) do _
-        planner = policy(net, actions(pomdp))
+        planner = policy(net, ordered_actions(pomdp))
         data = work_fun(pomdp, planner, params)
         return data.returns
     end

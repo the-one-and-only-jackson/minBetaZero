@@ -1,0 +1,41 @@
+        - using POMDPs, Random, StaticArrays, POMDPTools, SparseArrays
+        - 
+        - include("models/lasertag.jl")
+        - using .LaserTag
+        - 
+        - function randsp(pomdp, T, os, s, a)
+        0     si = stateindex(pomdp, s)
+        0     Ta = T[a]
+        0     spi = rowvals(Ta)
+        0     irange = nzrange(Ta, si)
+        0     p = nonzeros(Ta)
+        - 
+        -     w = zero(eltype(p))
+        0     r = rand(eltype(p))
+        -     i = first(irange)
+        0     while i < last(irange)
+        0         w += p[i]
+        0         if w < r
+        0             i += 1
+        -         else
+        -             break
+        -         end
+        -     end
+        -     
+        0     sp = os[spi[i]]
+        - 
+        0     return sp
+        - end
+        - 
+        - function test()
+        0     pomdp = LaserTagPOMDP()
+        0     T = transition_matrices(pomdp; sparse=true)
+      128     for a in actions(pomdp)
+     1296         T[a] = copy(transpose(T[a]))
+        0     end
+      104     os = ordered_states(pomdp)
+        0     s = rand(initialstate(pomdp))
+      128     a = rand(actions(pomdp))
+        - 
+       48     randsp(pomdp, T, os, s, a)
+        - end

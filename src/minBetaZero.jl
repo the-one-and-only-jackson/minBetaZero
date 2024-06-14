@@ -37,6 +37,7 @@ end
     use_belief_reward   = true
     use_gumbel_target   = true
     num_itr_stored      = 1
+    n_net_episodes      = nworkers() > 1 ? nworkers() : 0
 
     GumbelSolver_args   = (;
         tree_queries        = 100,
@@ -68,7 +69,8 @@ include("collect_distributed.jl")
 
 function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
     (; n_iter, input_dims, na, buff_cap, n_particles, n_planning_particles, 
-    train_on_planning_b, train_intensity, warmup_steps, num_itr_stored) = params
+    train_on_planning_b, train_intensity, warmup_steps, num_itr_stored, n_net_episodes
+    ) = params
 
     @assert nworkers() > 1 || Threads.nthreads() > 1 """
     Error: Distributed computing is not available. 
@@ -101,31 +103,28 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
             returns, steps = gen_data_distributed(pomdp, net, params, buffer)
         else
             returns, steps = gen_data_threaded(pomdp, net, params, buffer)
-        end
-        
+        end 
                 
         episodes = length(returns)
-        returns_mean = mean(returns)
-        returns_error = std(returns)/sqrt(length(returns))
+        returns_mean, returns_error = get_stats(returns)
+        _rm, _re = rounded_stats(returns_mean, returns_error)
         push!.(
             (info[:steps], info[:episodes], info[:returns], info[:returns_error]), 
             (steps, episodes, returns_mean, returns_error)
         )
-        _rm = round(returns_mean; sigdigits=1+Base.hidigit(returns_mean,10)-Base.hidigit(returns_error,10))
-        _re = round(returns_error; sigdigits=1)
         @info "Mean return $_rm +/- $_re"
         @info "Gathered $steps data points over $episodes episodes"
 
-        # net_results = test_network(net, pomdp, params; n_episodes=100)
-        # returns_mean = mean(net_results)
-        # returns_error = std(net_results)/sqrt(length(net_results))
-        # push!.(
-        #     (info[:network_returns], info[:network_returns_error]),
-        #     (returns_mean, returns_error)
-        # )
-        # _rm = round(returns_mean; sigdigits=1+Base.hidigit(returns_mean,10)-Base.hidigit(returns_error,10))
-        # _re = round(returns_error; sigdigits=1)
-        # @info "Network mean return $_rm +/- $_re"
+        if n_net_episodes > 0
+            net_results = test_network(net, pomdp, params; n_episodes=n_net_episodes)
+            returns_mean, returns_error = get_stats(net_results)
+            _rm, _re = rounded_stats(returns_mean, returns_error)
+            push!.(
+                (info[:network_returns], info[:network_returns_error]),
+                (returns_mean, returns_error)
+            )
+            @info "Network mean return $_rm +/- $_re"
+        end
 
         # This is so we get the stats after the n_iter network update
         if itr == 1 + n_iter
@@ -153,6 +152,19 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
     info[:episodes] = cumsum(info[:episodes])
 
     return net, info
+end
+
+function get_stats(x)
+    mu = mean(x)
+    sigma = std(x; mean=mu)/sqrt(length(x))
+    return mu, sigma
+end
+
+function rounded_stats(mu, sigma; sigdigits=1)
+    mu_digits = sigdigits + Base.hidigit(mu,10) - Base.hidigit(sigma,10)
+    rounded_mu = round(mu; sigdigits = mu_digits)
+    rounded_sigma = round(sigma; sigdigits)
+    return rounded_mu, rounded_sigma
 end
 
 function train!(net, buffer::DataBuffer, params::minBetaZeroParameters, n_batches::Int)
