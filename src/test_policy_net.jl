@@ -26,7 +26,7 @@ function test_network(net, pomdp::POMDP, params::minBetaZeroParameters; n_episod
     end
 end
 
-function distributed_test_network(net, pomdp::POMDP, params::minBetaZeroParameters; n_episodes=500, policy=netPolicyStoch)
+function distributed_test_network(net, pomdp::POMDP, params::minBetaZeroParameters; n_episodes, policy)
     ret_vec = pmap(1:n_episodes) do _
         planner = policy(net, ordered_actions(pomdp))
         data = work_fun(pomdp, planner, params)
@@ -34,7 +34,8 @@ function distributed_test_network(net, pomdp::POMDP, params::minBetaZeroParamete
     end
 end
 
-function threaded_test_network(net, pomdp::POMDP, params::minBetaZeroParameters; n_episodes=500, policy=netPolicyStoch)
+function threaded_test_network(net, pomdp::POMDP, params::minBetaZeroParameters; n_episodes, policy)
     # single threaded for now
+    @warn "Single threaded network test not implemented" maxlog=1
     return [0.0]
 end

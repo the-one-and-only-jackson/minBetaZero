@@ -2,7 +2,9 @@ module NeuralNet
 
 using Flux, CUDA, SparseArrays
 
-export NetworkParameters, ActorCritic, getloss
+export NetworkParameters, ActorCritic, getloss, CGF
+
+include("cgf.jl")
 
 @kwdef mutable struct NetworkParameters
     # architecture
@@ -252,39 +254,5 @@ function mlp(;
     head && push!(layers, Dense(dims[end-1] => dims[end]; init=head_init))
     return Chain(layers...)
 end
-
-# """
-# Train policy & value neural network `f` using the latest `data` generated from online tree search (MCTS).
-# """
-# function train(f::ActorCritic, nn_params::BetaZeroSolver, train_data, test_data=nothing; verbose::Bool=false)
-#     lr = nn_params.learning_rate
-#     λ = nn_params.λ_regularization
-
-#     train_data = train_data |> nn_params.device
-
-#     f = nn_params.device(f) # Put network on GPU for training
-#     opt = Flux.setup(Flux.Optimiser(nn_params.optimizer(lr), WeightDecay(lr*λ)), f)
-
-#     for _ in 1:nn_params.training_epochs
-#         Flux.trainmode!(f)
-#         for (x, y) in train_data    
-#             grads = Flux.gradient(f) do f
-#                 w = eltype(y)(nn_params.value_loss_weight)
-#                 losses = getloss(f, x, y.value_target, y.policy_target)
-#                 w * losses.value_loss + (1-w) * losses.policy_loss
-#             end
-#             Flux.update!(opt, f, grads[1])
-#         end
-#         Flux.testmode!(f)
-
-#         # do stuff with validation
-#     end
-
-#     GC.gc(true)
-#     nn_params.device == gpu && CUDA.reclaim()
-
-#     return cpu(f)
-# end
-
 
 end

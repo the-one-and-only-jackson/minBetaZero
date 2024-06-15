@@ -43,7 +43,8 @@ function work_fun(pomdp, planner, params)
 
     use_gumbel_target = use_gumbel_target && isa(planner, GumbelPlanner)
 
-    up = BootstrapFilter(pomdp, n_particles)
+    # up = BootstrapFilter(pomdp, n_particles)
+    up = DiscreteUpdater(pomdp)
     b = initialize_belief(up, initialstate(pomdp))
     s = rand(initialstate(pomdp))
 
@@ -54,12 +55,13 @@ function work_fun(pomdp, planner, params)
     belief_reward = Float32[]
 
     for step_num in 1:t_max
-        if n_planning_particles == n_particles
-            b_querry = b
-        else
-            b_perm = randperm(n_particles)[1:n_planning_particles]
-            b_querry = ParticleCollection(particles(b)[b_perm])
-        end
+        # if n_planning_particles == n_particles
+        #     b_querry = b
+        # else
+        #     b_perm = randperm(n_particles)[1:n_planning_particles]
+        #     b_querry = ParticleCollection(particles(b)[b_perm])
+        # end
+        b_querry = rand(b, n_planning_particles)
         
         a, a_info = action_info(planner, b_querry)
         aid = actionindex(pomdp, a)
@@ -85,9 +87,10 @@ function work_fun(pomdp, planner, params)
             break
         end
 
-        b = myupdate(up, b, a, o)
+        # b = myupdate(up, b, a, o)
+        b = POMDPs.update(up, b, a, o)
 
-        if isnothing(b) || any(isterminal(pomdp, p) for p in particles(b))
+        if isnothing(b) || (b isa AbstractParticleBelief && any(isterminal(pomdp, p) for p in particles(b)))
             if isnothing(b)
                 @warn "Particle depletion - random rollout"
             else
@@ -165,4 +168,11 @@ function myupdate(up::BasicParticleFilter, b::ParticleCollection, a, o)
         b, a, o,
         up.rng
     )
+end
+
+Base.eltype(::Type{DiscreteBelief{P,T}}) where {P,T} = T
+function Random.rand(rng::Random.AbstractRNG, st::Random.SamplerTrivial{<:DiscreteBelief})
+    b = st[]
+    i = sample(rng, Weights(b.b))
+    return b.state_list[i]
 end

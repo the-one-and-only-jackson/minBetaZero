@@ -1,10 +1,8 @@
 module minBetaZero
 
 using Flux, CUDA
-using POMDPs, POMDPTools
-using ParticleFilters
-using Statistics, Distributions, Random
-using Pkg
+using POMDPs, POMDPTools, ParticleFilters
+using Statistics, StatsBase, Distributions, Random
 using ProgressMeter, Plots
 using Distributed
 
@@ -14,15 +12,11 @@ export PFTBelief, GuidedTree, GumbelSolver, GumbelPlanner
 
 include("neural_network.jl")
 using .NeuralNet
-export NetworkParameters, ActorCritic, getloss
+export NetworkParameters, ActorCritic, getloss, CGF
 
 export betazero, minBetaZeroParameters, input_representation
 
 function input_representation end
-
-function setup()
-    Pkg.develop(PackageSpec(url=joinpath(@__DIR__,"..","lib","ParticleFilterTrees")))
-end
 
 @kwdef struct minBetaZeroParameters
     t_max               = 100

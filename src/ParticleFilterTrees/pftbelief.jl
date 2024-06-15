@@ -75,7 +75,13 @@ function initialize_belief!(
 
     w_i = inv(length(s))
     fill!(w, w_i) # all particles equal weight
-    rand!(rng, s, b)
+    if Base.haslength(b) && length(b) == length(s)
+        for i in eachindex(s)
+            s[i] = b[i]
+        end
+    else
+        rand!(rng, s, b)
+    end
     non_terminal_ws = w_i * count(x->!isterminal(pomdp,x), s)
     return PFTBelief(s, w, non_terminal_ws)
 end
