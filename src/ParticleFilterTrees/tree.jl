@@ -6,7 +6,6 @@
 - `b` - Vector of beliefs (`PFTBelief`)
 - `b_children` - Mapping belief ID to (action, action ID) pair
 - `b_rewards` - R(b,a) where index is ID of b' where b' = τ(b,a,o)
-- `bao_children` - `(ba_idx,O) => bp_idx`
 - `ba_children` - `ba_idx => [bp_idx, bp_idx, bp_idx, ...]`
 ...
 """
@@ -16,31 +15,25 @@ struct GuidedTree{S,A,O}
     Qha::PV{Float64} # Map ba node to associated Q value
 
     b::PV{PFTBelief{S}}
-    b_children::NPV{Pair{A,Int}}# b_idx => [(a,ba_idx), ...]
-    b_rewards::PV{Float64}# Map b' node index to immediate reward associated with trajectory bao where b' = τ(bao)
-    b_ntprob::PV{Float64} # Map b' node index to proportion of non-terminal states before resampling
+    b_children::NPV{Pair{A,Int}} # b_idx => [(a,ba_idx), ...]
+    b_rewards::PV{Float64} # Map b' node index to immediate reward associated with trajectory bao where b' = τ(bao)
     b_V::PV{Float32} # Map b' node index to estimated value (i.e. from network)
     b_P::PV{Vector{Float32}} # Map b' node index to policy
     b_logits::PV{Vector{Float32}} # Map b' node index to policy logits
-
-    bao_children::Dict{Tuple{Int,O},Int} # (ba_idx,O) => bp_idx
     ba_children::NPV{Int} # ba_idx => [bp_idx, bp_idx, bp_idx, ...]
 
-    function GuidedTree{S,A,O}(sz::Int, na::Int, check_repeat_obs::Bool=true, k_o=10) where {S,A,O}
+    function GuidedTree{S,A,O}(sz::Int, na::Int, k_o=10) where {S,A,O}
         return new(
             PushVector{Int}(sz),
             PushVector{Int}(sz),
             PushVector{Float64}(sz),
 
             PushVector{PFTBelief{S}}(sz),
-            NestedPushVector{Pair{A,Int}}(ceil(Int,k_o), sz),
-            PushVector{Float64}(sz),
+            NestedPushVector{Pair{A,Int}}(ceil(Int, k_o), sz),
             PushVector{Float64}(sz),
             PushVector{Float32}(sz),
             PushVector{Vector{Float32}}(sz),
             PushVector{Vector{Float32}}(sz),
-
-            sizehint!(Dict{Tuple{Int,O},Int}(), check_repeat_obs ? sz : 0),
             NestedPushVector{Int}(na, sz),
         )
     end
@@ -50,21 +43,13 @@ function insert_belief!(
     tree::GuidedTree{S,A,O}, 
     bp::PFTBelief{S}, 
     ba_idx::Int, 
-    obs::O, 
     r::Float64, 
-    nt_prob::Float64, 
     V::Float32, 
-    logits::Vector{Float32},
-    check_repeat_obs::Bool
+    logits::Vector{Float32}
     ) where {S,A,O}
     
-    bp_idx = _insert_belief!(tree, bp, V, logits, r, nt_prob)
+    bp_idx = _insert_belief!(tree, bp, V, logits, r)
     push!(tree.ba_children[ba_idx], bp_idx)
-
-    if check_repeat_obs
-        tree.bao_children[(ba_idx,obs)] = bp_idx
-    end
-
     return bp_idx
 end
 
@@ -74,7 +59,6 @@ function _insert_belief!(
     V::Float32,
     logits::Vector{Float32},
     r::Float64 = 0.0,
-    nt_prob::Float64 = 1.0
     ) where {S,A,O}
 
     b_idx = length(tree.b)+1
@@ -82,7 +66,6 @@ function _insert_belief!(
     push!(tree.b, b)
     push!(tree.Nh, 0)
     push!(tree.b_rewards, r)
-    push!(tree.b_ntprob, nt_prob)
     push!(tree.b_V, V)
     push!(tree.b_logits, logits)
     push!(tree.b_P, softmax(logits))
@@ -105,9 +88,7 @@ function insert_root!(
     empty!(tree.b)
     empty!(tree.b_children)
     empty!(tree.b_rewards)
-    empty!(tree.bao_children)
     empty!(tree.ba_children)
-    empty!(tree.b_ntprob)
     empty!(tree.b_V)
     empty!(tree.b_P)
     empty!(tree.b_logits)

@@ -124,52 +124,6 @@ function initialize_belief!(
     return PFTBelief(s, w, 1.0)
 end
 
-#= 
-function initialize_belief!(
-    rng::AbstractRNG, s::Vector{S}, w::Vector{Float64}, pomdp::POMDP{S}, b
-    ) where {S}
-    
-    w_i = inv(length(s))
-    w = fill!(w,w_i) # all particles equal weight
-    terminal_count = 0
-
-    if b isa AbstractParticleBelief
-        perm = randperm(n_particles(b))
-        perm_idx = 0
-        for s_idx in eachindex(s)
-            perm_idx += 1
-            p = particle(b, perm[perm_idx])
-            terminal_flag = isterminal(pomdp, p)
-            while terminal_flag && perm_idx < n_particles(b)
-                perm_idx += 1
-                p = particle(b, perm[perm_idx])
-                terminal_flag = isterminal(pomdp, p)
-            end
-            if !terminal_flag
-                s[s_idx] = p
-            elseif s_idx == 1
-                @warn "All states in input belief are terminal"
-                @views rand!(rng, s, b)
-                terminal_count = length(s)
-                break
-            else
-                @warn "Fewer non-terminal beliefs (N = $(s_idx-1)) than PFT particles \\
-                    (N = $(length(s)))"
-                @views rand!(rng, s[s_idx:end], s[1:s_idx-1])
-                break
-            end
-        end
-    else
-        rand!(rng, s, b)
-        terminal_count = count(x->isterminal(pomdp,x), s)
-    end
-
-    non_terminal_ws = 1 - w_i * terminal_count
-    return PFTBelief(s, w, non_terminal_ws)
-end
-=#
-
-
 function GenBelief(
     rng::AbstractRNG,
     pomdp::POMDP{S,A,O},

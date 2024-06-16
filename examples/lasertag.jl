@@ -1,6 +1,6 @@
 using Distributed
 
-addprocs(10; topology=:master_worker, enable_threaded_blas=true) # uses around 2GB of memory per worker
+addprocs(12; topology=:master_worker, enable_threaded_blas=true) # uses around 2GB of memory per worker
 
 @everywhere begin
     using minBetaZero
@@ -32,8 +32,19 @@ end
 
 include("testtools.jl")
 
+@everywhere struct RMSNorm{S, B}
+    scale::S
+    bias::B
+end
+@everywhere begin
+    RMSNorm(d; bias=true) = RMSNorm(ones(Float32,d), bias ? zeros(Float32,d) : false)
+    (block::RMSNorm)(x) = block.scale .* x .* sqrt.(size(x,1) ./ (sum(abs2, x; dims=1) .+ eps(eltype(x)))) .+ block.bias
+    Flux.@layer :expand RMSNorm
+end
+
+
 function ffres(d::Int, act=identity; p=0.0, k=4)
-    block = Chain(Dense(d, k*d, act), Dense(k*d, d), Flux.Dropout(p))
+    block = Chain(RMSNorm(d), Dense(d, k*d, act), Dense(k*d, d), Flux.Dropout(p))
     return Flux.Parallel(+, identity, block)
 end
 
@@ -43,33 +54,32 @@ nx = 4
 
 params = minBetaZeroParameters(
     GumbelSolver_args = (;
-        tree_queries        = 40,
-        k_o                 = 20.,
-        check_repeat_obs    = false,
-        resample            = true,
-        cscale              = 0.1,
-        cvisit              = 50.,
-        n_particles         = 200, 
-        m_acts_init         = 2
+        tree_queries        = 10,
+        k_o                 = 5., # half tree_queries for 2 initial actions and 1-step lookahead
+        resample            = true, # force true, evenly weighted particles ideal for training
+        cscale              = 0.1, # 1.0 trains faster but less stable
+        cvisit              = 50., # not worth tuning
+        n_particles         = 100, 
+        m_acts_init         = 2 # number of actions sampled at root
     ),
     t_max           = 250,
-    n_episodes      = 200,
-    n_iter          = 200,
+    n_episodes      = 100, # per iteration
+    n_iter          = 1500,
     batchsize       = 1024,
     lr              = 1e-3,
-    value_scale     = 0.5,
-    lambda          = 1e-2,
-    plot_training   = true,
-    train_on_planning_b = true,
-    n_planning_particles = 200,
+    value_scale     = 0.5, # learning rate scaling
+    lambda          = 1e-2, # weight decay
+    plot_training   = false,
+    train_on_planning_b = true, # this should probably not be a parameter, force true
+    n_planning_particles = 100, # match n_particles in Gumbel args
     train_device    = gpu,
-    train_intensity = 8,
-    input_dims = (nx,),
-    na = na,
+    train_intensity = 4, # 4-8 seems safe?
+    input_dims = (nx,), # pomdp dependent input dimension
+    na = na, # pomdp dependent number of actions
     use_belief_reward = false,
-    use_gumbel_target = true,
-    num_itr_stored = 5,
-    n_net_episodes = 200
+    use_gumbel_target = true, # policy target
+    num_itr_stored = 5, # buffer
+    n_net_episodes = 25 # policy-only evalutions per iteration
 )
 
 moments_nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
@@ -78,10 +88,10 @@ moments_nn_params = NetworkParameters( # These are POMDP specific! not general p
     critic_loss         = Flux.Losses.logitcrossentropy,
     critic_categories   = collect(range(-100, 100, length=128)),
     p_dropout           = 0.1,
-    neurons             = 256,
-    hidden_layers       = 2,
-    shared_net          = mean_std_layer,
-    shared_out_size     = (2nx,) # must manually set... fix at a later date...        
+    neurons             = 128,
+    hidden_layers       = 1,
+    shared_net          = Chain(mean_std_layer, Dense(2nx=>128), ffres(128, gelu; p=0.1, k=4)),
+    shared_out_size     = (128,) # must manually set... fix at a later date...        
 )
 
 cgf_nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
@@ -90,10 +100,10 @@ cgf_nn_params = NetworkParameters( # These are POMDP specific! not general param
     critic_loss         = Flux.Losses.logitcrossentropy,
     critic_categories   = collect(range(-100, 100, length=128)),
     p_dropout           = 0.1,
-    neurons             = 256,
-    hidden_layers       = 2,
-    shared_net          = CGF(nx=>256), 
-    shared_out_size     = (256,) # must manually set... fix at a later date...        
+    neurons             = 128,
+    hidden_layers       = 1,
+    shared_net          = Chain(CGF(nx=>128), ffres(128, gelu; p=0.1, k=4)), 
+    shared_out_size     = (128,) # must manually set... fix at a later date...        
 )
 
 # despot 48
@@ -106,8 +116,12 @@ x1 = info_moment[:steps] .- first(info_moment[:steps])
 y1 = info_moment[:returns]
 y2 = info_moment[:network_returns]
 
-plot_smoothing!(p, x1, y1; k=5, label="Moments - Tree", c=1)
-plot_smoothing!(p, x1, y2; k=5, label="Moments - Net", c=2)
+plot_smoothing!(p, x1, y1; k=2, label="Moments - Tree", c=1)
+plot_smoothing!(p, x1, y2; k=2, label="Moments - Net", c=2)
+
+plot!(ylims=(0,70), xlims=(0,maximum(x1)), right_margin=5Plots.mm)
+
+savefig("examples/moments.png")
 
 
 @time net_cgf, info_cgf = betazero(params, pomdp, ActorCritic(cgf_nn_params));
@@ -116,11 +130,11 @@ x2 = info_cgf[:steps] .- first(info_cgf[:steps])
 y3 = info_cgf[:returns]
 y4 = info_cgf[:network_returns]
 
-plot_smoothing!(p, x2, y3; label="CGF - Tree", c=3)
-plot_smoothing!(p, x2, y4; label="CGF - Net", c=4)
+plot_smoothing!(p, x2, y3; k=5, label="CGF - Tree", c=3)
+plot_smoothing!(p, x2, y4; k=5, label="CGF - Net", c=4)
 
-plot!(ylims=(0,50), xlims=(0,max(maximum.((x1,x2))...)), right_margin=5Plots.mm)
-savefig("no_measure.png")
+plot!(ylims=(0,70), xlims=(0,max(maximum.((x1,x2))...)), right_margin=5Plots.mm)
+savefig("examples/moments_cgf.png")
 
 y_rand = -68.4 # recalculate for given pomdp
 y_qmdp = 23.0 # recalculate for given pomdp
@@ -134,8 +148,7 @@ plot!(ylims=(0,1.5), yticks=0:0.3:1.5, xlims=(0,max(maximum.((x1,x2))...)))
 
 
 
-
-
+## Showing the distribution of the mean return after 100 episodes
 
 net_results = [
     minBetaZero.test_network(net_moment, pomdp, params; n_episodes=100, policy=minBetaZero.netPolicyStoch)
@@ -147,3 +160,78 @@ mean(data)
 std(data)/sqrt(length(data))
 histogram(data; label=false, title="100 Episode Mean", xlabel="Mean Return", ylabel="Frequency", weights=fill(1/length(data), length(data)))
 savefig("dist.png")
+
+
+
+
+
+
+
+planner = minBetaZero.netPolicyStoch(net_moment, ordered_actions(pomdp))
+
+up = DiscreteUpdater(pomdp)
+b = initialize_belief(up, initialstate(pomdp))
+s = rand(initialstate(pomdp))
+
+b_vec = []
+b_querry_vec = []
+a_vec = []
+s_vec = [s]
+r_vec = Float64[]
+
+for step_num in 1:250
+    b_querry = rand(b, 100)
+    
+    a = action(planner, b_querry)
+    s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
+
+    push!.((b_vec, b_querry_vec, a_vec, s_vec, r_vec), (b, b_querry, a, s, r))
+
+    if isterminal(pomdp, s)
+        break
+    end
+
+    b = POMDPs.update(up, b, a, o)
+end
+
+r_total = sum(r_vec .* discount(pomdp) .^ (0:length(r_vec)-1))
+println("Epsidoic Return: $r_total")
+
+
+f(x) = max(0, 1+log10(x)/3)
+common = (label=false, seriestype=:scatter, markercolor=:black, markersize=10, xticks=(1.5:10.5, 1:10), yticks=(1.5:7.5, 1:7), xlims=(1,11), ylims=(1,8))
+robot_states = [s.robot for s in b_vec[1].state_list]
+target_states = [s.target for s in b_vec[1].state_list]
+
+anim = Plots.@animate for i in eachindex(b_vec)
+    r = [0.0 for i in 1:10, j in 1:7]
+    for (s, p) in zip(robot_states, b_vec[i].b)
+        r[s...] += p
+    end
+
+    t = [0.0 for i in 1:10, j in 1:7]
+    for (s, p) in zip(target_states, b_vec[i].b)
+        t[s...] += p
+    end
+        
+    hr = heatmap(0.5 .+ (1:10), 0.5 .+ (1:7), f.(r)'; c = Plots.cgrad(:roma), clim=(0,1))
+    ht = heatmap(0.5 .+ (1:10), 0.5 .+ (1:7), f.(t)'; c = Plots.cgrad(:roma), clim=(0,1))
+    
+    obs = stack([pomdp.obstacles...])
+    robot_pos = s_vec[i].robot
+    target_pos = s_vec[i].target
+
+    for p in [hr, ht]
+        plot!(p, [0.5 + robot_pos[1]], [0.5 + robot_pos[2]]; markershape=:circle, common...)
+        plot!(p, [0.5 + target_pos[1]], [0.5 + target_pos[2]]; markershape=:star5, common...)
+        plot!(p, 0.5 .+ obs[1,:], 0.5 .+ obs[2,:]; markershape=:x, common...)
+    end
+    
+    plot!(hr, colorbar=nothing, title="Robot Belief")
+    plot!(ht, colorbar=nothing, title="Target Belief")
+    
+    plot(hr, ht; layout=(1,2), size=(800,400))
+end
+
+gif(anim, "examples/belief.gif", fps = 1)
+
