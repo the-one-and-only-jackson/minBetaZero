@@ -51,13 +51,11 @@ function reset_tree!(tree::GuidedTree)
     end
 end
 
-function insert_belief!(
-    tree::GuidedTree{S},
-    b::S;
+function insert_belief!(tree::GuidedTree{S}, b::S;
     logits::Vector{<:Real} = log.(policy),
     policy::Vector{<:Real} = softmax(logits),
     value::Real = 0.0,
-    r::Real = 0.0,
+    r::Real     = 0.0,
     ba_idx::Int = 0 # parent, 0 for root
     ) where S
 

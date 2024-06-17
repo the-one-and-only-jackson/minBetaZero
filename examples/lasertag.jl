@@ -78,8 +78,10 @@ params = minBetaZeroParameters(
     na = na, # pomdp dependent number of actions
     use_belief_reward = false,
     use_gumbel_target = true, # policy target
-    num_itr_stored = 10, # buffer
-    n_net_episodes = 25 # policy-only evalutions per iteration
+    n_net_episodes = 25, # policy-only evalutions per iteration
+
+    buff_cap        = 25_000,
+    warmup_steps    = 5_000
 )
 
 moments_nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions

@@ -62,12 +62,12 @@ include("collect_threaded.jl")
 include("collect_distributed.jl")
 
 function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
-    (; n_iter, input_dims, na, buff_cap, n_particles, n_planning_particles, 
-    train_on_planning_b, train_intensity, warmup_steps, num_itr_stored, n_net_episodes
+    (; n_iter, input_dims, na, buff_cap, n_particles, n_planning_particles,
+    train_on_planning_b, train_intensity, warmup_steps, n_net_episodes
     ) = params
 
     @assert nworkers() > 1 || Threads.nthreads() > 1 """
-    Error: Distributed computing is not available. 
+    Error: Distributed computing is not available.
     Please run `addprocs()` or start Julia with `--threads` to a value greater than 1.
     """
 
@@ -89,7 +89,7 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
     for itr in 1:n_iter+1
         iter_timer = time()
 
-        (mod(itr-1, num_itr_stored) == 0) && reset_buffer!(buffer)
+        # (mod(itr-1, num_itr_stored) == 0) && reset_buffer!(buffer)
 
         @info itr <= n_iter ? "Gathering Data - Iteration: $itr" : "Gathering Data - Final Evaluation"
 
@@ -97,13 +97,13 @@ function betazero(params::minBetaZeroParameters, pomdp::POMDP, net)
             returns, steps = gen_data_distributed(pomdp, net, params, buffer)
         else
             returns, steps = gen_data_threaded(pomdp, net, params, buffer)
-        end 
-                
+        end
+
         episodes = length(returns)
         returns_mean, returns_error = get_stats(returns)
         _rm, _re = rounded_stats(returns_mean, returns_error)
         push!.(
-            (info[:steps], info[:episodes], info[:returns], info[:returns_error]), 
+            (info[:steps], info[:episodes], info[:returns], info[:returns_error]),
             (steps, episodes, returns_mean, returns_error)
         )
         @info "Mean return $_rm +/- $_re"
@@ -172,13 +172,13 @@ function train!(net, buffer::DataBuffer, params::minBetaZeroParameters, n_batche
     opt = Flux.setup(Flux.Optimiser(Flux.Adam(lr), WeightDecay(lr*lambda)), net)
 
     info = Dict(
-        :policy_loss => Float32[], 
-        :policy_KL   => Float32[], 
-        :value_loss  => Float32[], 
+        :policy_loss => Float32[],
+        :policy_KL   => Float32[],
+        :value_loss  => Float32[],
         :value_FVU   => Float32[]
     )
-    
-    Flux.trainmode!(net) 
+
+    Flux.trainmode!(net)
     for _ in 1:n_batches
         data = sample_minibatch(buffer, batchsize) |> train_device
 
@@ -188,7 +188,7 @@ function train!(net, buffer::DataBuffer, params::minBetaZeroParameters, n_batche
         grads = Flux.gradient(net) do net
             losses = getloss(net, data.network_input; data.value_target, data.policy_target)
 
-            Flux.Zygote.ignore_derivatives() do 
+            Flux.Zygote.ignore_derivatives() do
                 push!(info[:policy_loss], losses.policy_loss          )
                 push!(info[:policy_KL]  , losses.policy_loss - Etrain )
                 push!(info[:value_loss] , losses.value_loss           )
@@ -212,8 +212,8 @@ function train!(net, buffer::DataBuffer, params::minBetaZeroParameters, n_batche
             plot(info[:policy_loss]; ylabel="Policy Loss", plotargs...),
             plot(info[:value_FVU]; ylabel="FVU", plotargs...),
             plot(info[:policy_KL]; ylabel="Policy KL", plotargs...)
-            ; 
-            layout=(2,2), 
+            ;
+            layout=(2,2),
             size=(900,600)
         ) |> display
     end

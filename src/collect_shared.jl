@@ -7,15 +7,15 @@ function collect_data(buffer::DataBuffer, storage_channel, n_episodes::Int)
         data = take!(storage_channel)
         steps += length(data.value_target)
         set_buffer!(
-            buffer; 
-            network_input = data.network_input, 
-            value_target  = data.value_target, 
+            buffer;
+            network_input = data.network_input,
+            value_target  = data.value_target,
             policy_target = data.policy_target
         )
         ret_vec[i] = data.returns
         next!(progress)
     end
-    
+
     close(storage_channel)
 
     return ret_vec, steps
@@ -32,7 +32,7 @@ function collect_data_returns(storage_channel, n_episodes::Int)
         ret_vec[i] = data.returns
         next!(progress)
     end
-    
+
     close(storage_channel)
 
     return ret_vec, steps
@@ -63,7 +63,7 @@ function work_fun(pomdp, planner, params)
         #     b_querry = ParticleCollection(particles(b)[b_perm])
         # end
         b_querry = rand(b, n_planning_particles)
-        
+
         a, a_info = action_info(planner, b_querry)
         aid = actionindex(pomdp, a)
         s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
@@ -84,7 +84,7 @@ function work_fun(pomdp, planner, params)
             end
             push!(belief_reward, br)
         end
-        
+
         if isterminal(pomdp, s)
             break
         end
@@ -98,7 +98,7 @@ function work_fun(pomdp, planner, params)
             else
                 @warn "Terminal particle in belief - random rollout"
             end
-            
+
             for t in 1:t_max-step_num
                 a = rand(actions(pomdp))
                 s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
@@ -137,16 +137,17 @@ function work_fun(pomdp, planner, params)
 
     if use_gumbel_target
         policy_target = reduce(hcat, gumbel_target_vec)
-        value_target = reshape(tree_value_target, 1, :)
+        # value_target = reshape(tree_value_target, 1, :)
+        value_target  = reshape(output_reward, 1, :)
     else
         policy_target = Flux.onehotbatch(aid_vec, 1:length(actions(pomdp)))
         value_target  = reshape(output_reward, 1, :)
     end
 
-    data = (; 
-        network_input = stack(input_representation, b_vec), 
-        value_target  = value_target, 
-        policy_target = policy_target, 
+    data = (;
+        network_input = stack(input_representation, b_vec),
+        value_target  = value_target,
+        policy_target = policy_target,
         returns       = state_reward[1]
     )
 

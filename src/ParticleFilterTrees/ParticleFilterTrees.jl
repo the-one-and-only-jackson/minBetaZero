@@ -12,6 +12,7 @@ using NNlib: softmax!, softmax
 
 include("cache.jl")
 include("pushvector.jl")
+include("SeqHalf.jl")
 
 include("pftbelief.jl")
 export PFTBelief

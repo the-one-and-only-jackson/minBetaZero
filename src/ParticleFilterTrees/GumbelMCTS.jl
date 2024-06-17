@@ -7,9 +7,9 @@ Base.@kwdef struct GumbelSolver{RNG<:AbstractRNG, DA, F} <: Solver
     rng::RNG                = Random.default_rng()
     default_action::DA      = (pomdp::POMDP, ::Any) -> rand(rng, actions(pomdp))
     resample::Bool          = true
-    cscale::Float64         = 1.
+    cscale::Float64         = 0.1 # 1 for win/loss games, 0.1 for MDP
     cvisit::Float64         = 50.
-    m_acts_init::Int
+    m_acts_init::Int        = typemax(Int)
     getpolicyvalue::F
 end
 
@@ -22,7 +22,7 @@ end
     live_actions::BitVector = falses(length(actions(pomdp)))
     q_extrema::Vector{Float64} = [Inf, -Inf]
     noisy_logits::Vector{Float64} = zeros(length(actions(pomdp)))
-    target_N::SeqHalf = SeqHalf(; n=sol.tree_queries, m=sol.m_acts_init)
+    target_N::SeqHalf = SeqHalf(; n=sol.tree_queries, m=min(sol.m_acts_init, length(actions(pomdp))))
 end
 
 function get_dq(planner::GumbelPlanner; eps=1e-6)
@@ -214,9 +214,10 @@ function mcts_backward_root!(planner::GumbelPlanner, logits)
     map!(y -> -log(-log(y)), noisy_logits, noisy_logits)
     map!(+, noisy_logits, noisy_logits, logits)
 
-    # sample `m_acts_init` actions without replacement and insert them into the tree
+    # sample `n_root_actions` actions without replacement and insert them into the tree
+    n_root_actions = min(m_acts_init, length(live_actions))
     fill!(live_actions, false)
-    for ai in partialsortperm(noisy_logits, 1:m_acts_init; rev=true)
+    for ai in partialsortperm(noisy_logits, 1:n_root_actions; rev=true)
         live_actions[ai] = true
         insert_action!(tree, 1, ai)
     end
@@ -267,11 +268,11 @@ function select_root_action(planner::GumbelPlanner)
         end
     end
 
-    return _select_root_action(tree, live_actions)
-end
-
-function _select_root_action(tree::GuidedTree, live_actions::AbstractVector{Bool})
-    (; Nha, b_children) = tree
+    # Not sure why this errors out
+    # ai, ba_idx = argmin(
+    #     (ai, ba_idx) -> Nha[ba_idx],
+    #     ((ai, ba_idx) for (ai, ba_idx) in b_children[1] if live_actions[ai])
+    # )
 
     Nmax = typemax(Int)
     ai_opt = 0
@@ -284,7 +285,7 @@ function _select_root_action(tree::GuidedTree, live_actions::AbstractVector{Bool
         end
     end
 
-    return (ai_opt, ba_idx_opt)
+    return ai_opt, ba_idx_opt
 end
 
 function reduce_root_actions(planner::GumbelPlanner)
@@ -297,18 +298,12 @@ function reduce_root_actions(planner::GumbelPlanner)
     sigma = cscale * (cvisit + Nmax) / dq
 
     for _ in 1:floor(Int, count(live_actions) / 2)
-        aidx_min = 0
-        valmin = Inf
-        for (ai, ba_idx) in b_children[1]
-            !live_actions[ai] && continue
-            val = noisy_logits[ai] + sigma * Qha[ba_idx]
-            if val < valmin
-                valmin = val
-                aidx_min = ai
-            end
-        end
+        ai, _ = argmin(
+            (ai, ba_idx) -> noisy_logits[ai] + sigma * Qha[ba_idx],
+            ((ai, ba_idx) for (ai, ba_idx) in b_children[1] if live_actions[ai])
+        )
 
-        live_actions[aidx_min] = false
+        live_actions[ai] = false
     end
 
     nothing
@@ -346,7 +341,8 @@ function improved_policy(planner::GumbelPlanner, b_idx::Int)
 
     new_logits = b_logits[b_idx] .+ sigma * v_mix
     for (ai, ba_idx) in b_children[b_idx]
-        new_logits[ai] += sigma * (Qha[ba_idx] - v_mix)
+        advantage = Qha[ba_idx] - v_mix
+        new_logits[ai] += sigma * advantage
     end
 
     pi_completed = softmax!(new_logits)
