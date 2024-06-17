@@ -53,6 +53,7 @@ function work_fun(pomdp, planner, params)
     gumbel_target_vec = Vector[]
     state_reward = Float32[]
     belief_reward = Float32[]
+    tree_value_target = Float32[]
 
     for step_num in 1:t_max
         # if n_planning_particles == n_particles
@@ -73,6 +74,7 @@ function work_fun(pomdp, planner, params)
 
         if use_gumbel_target
             push!(gumbel_target_vec, a_info.policy_target)
+            push!(tree_value_target, a_info.v_mix)
         end
 
         if use_belief_reward
@@ -135,13 +137,15 @@ function work_fun(pomdp, planner, params)
 
     if use_gumbel_target
         policy_target = reduce(hcat, gumbel_target_vec)
+        value_target = reshape(tree_value_target, 1, :)
     else
         policy_target = Flux.onehotbatch(aid_vec, 1:length(actions(pomdp)))
+        value_target  = reshape(output_reward, 1, :)
     end
 
     data = (; 
         network_input = stack(input_representation, b_vec), 
-        value_target  = reshape(output_reward, 1, :), 
+        value_target  = value_target, 
         policy_target = policy_target, 
         returns       = state_reward[1]
     )

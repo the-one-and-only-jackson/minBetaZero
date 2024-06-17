@@ -23,11 +23,11 @@ end
         stack(y->convert(AbstractVector, y) / 3f0, b)
     end
 
-    function mean_std_layer(x) 
+    function mean_std_layer(x)
         mu_x = mean(x; dims=2)
         std_x = std(x; dims=2, mean=mu_x)
         dropdims(cat(mu_x, std_x; dims=1); dims=2)
-    end    
+    end
 end
 
 include("testtools.jl")
@@ -59,12 +59,12 @@ params = minBetaZeroParameters(
         resample            = true, # force true, evenly weighted particles ideal for training
         cscale              = 0.1, # 1.0 trains faster but less stable
         cvisit              = 50., # not worth tuning
-        n_particles         = 100, 
+        n_particles         = 100,
         m_acts_init         = 2 # number of actions sampled at root
     ),
     t_max           = 250,
     n_episodes      = 100, # per iteration
-    n_iter          = 1500,
+    n_iter          = 500,
     batchsize       = 1024,
     lr              = 1e-3,
     value_scale     = 0.5, # learning rate scaling
@@ -73,12 +73,12 @@ params = minBetaZeroParameters(
     train_on_planning_b = true, # this should probably not be a parameter, force true
     n_planning_particles = 100, # match n_particles in Gumbel args
     train_device    = gpu,
-    train_intensity = 4, # 4-8 seems safe?
+    train_intensity = 8, # 4-8 seems safe?
     input_dims = (nx,), # pomdp dependent input dimension
     na = na, # pomdp dependent number of actions
     use_belief_reward = false,
     use_gumbel_target = true, # policy target
-    num_itr_stored = 5, # buffer
+    num_itr_stored = 10, # buffer
     n_net_episodes = 25 # policy-only evalutions per iteration
 )
 
@@ -91,7 +91,7 @@ moments_nn_params = NetworkParameters( # These are POMDP specific! not general p
     neurons             = 128,
     hidden_layers       = 1,
     shared_net          = Chain(mean_std_layer, Dense(2nx=>128), ffres(128, gelu; p=0.1, k=4)),
-    shared_out_size     = (128,) # must manually set... fix at a later date...        
+    shared_out_size     = (128,) # must manually set... fix at a later date...
 )
 
 cgf_nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
@@ -101,9 +101,9 @@ cgf_nn_params = NetworkParameters( # These are POMDP specific! not general param
     critic_categories   = collect(range(-100, 100, length=128)),
     p_dropout           = 0.1,
     neurons             = 128,
-    hidden_layers       = 1,
-    shared_net          = Chain(CGF(nx=>128), ffres(128, gelu; p=0.1, k=4)), 
-    shared_out_size     = (128,) # must manually set... fix at a later date...        
+    hidden_layers       = 2,
+    shared_net          = CGF(nx=>128),
+    shared_out_size     = (128,) # must manually set... fix at a later date...
 )
 
 # despot 48
@@ -116,12 +116,14 @@ x1 = info_moment[:steps] .- first(info_moment[:steps])
 y1 = info_moment[:returns]
 y2 = info_moment[:network_returns]
 
-plot_smoothing!(p, x1, y1; k=2, label="Moments - Tree", c=1)
-plot_smoothing!(p, x1, y2; k=2, label="Moments - Net", c=2)
+plot_smoothing!(p, x1, y1; k=5, label="Moments - Tree", c=1)
+plot_smoothing!(p, x1, y2; k=5, label="Moments - Net", c=2)
 
-plot!(ylims=(0,70), xlims=(0,maximum(x1)), right_margin=5Plots.mm)
+y12_max = 5*ceil(maximum(max(maximum(y1), maximum(y2)))/5)
 
-savefig("examples/moments.png")
+plot!(ylims=(0,y12_max), yticks=0:5:y12_max, xlims=(0,maximum(x1)), right_margin=5Plots.mm)
+
+savefig("examples/moments_3.png")
 
 
 @time net_cgf, info_cgf = betazero(params, pomdp, ActorCritic(cgf_nn_params));
@@ -133,8 +135,11 @@ y4 = info_cgf[:network_returns]
 plot_smoothing!(p, x2, y3; k=5, label="CGF - Tree", c=3)
 plot_smoothing!(p, x2, y4; k=5, label="CGF - Net", c=4)
 
-plot!(ylims=(0,70), xlims=(0,max(maximum.((x1,x2))...)), right_margin=5Plots.mm)
-savefig("examples/moments_cgf.png")
+y34_max = 5*ceil(maximum(max(maximum(y3), maximum(y4)))/5)
+
+plot!(ylims=(0,max(y12_max,y34_max)), yticks=0:5:max(y12_max,y34_max), xlims=(0,max(maximum.((x1,x2))...)), right_margin=5Plots.mm)
+
+savefig("examples/moments_cgf_2.png")
 
 y_rand = -68.4 # recalculate for given pomdp
 y_qmdp = 23.0 # recalculate for given pomdp
@@ -181,7 +186,7 @@ r_vec = Float64[]
 
 for step_num in 1:250
     b_querry = rand(b, 100)
-    
+
     a = action(planner, b_querry)
     s, r, o = @gen(:sp,:r,:o)(pomdp, s, a)
 
@@ -213,10 +218,10 @@ anim = Plots.@animate for i in eachindex(b_vec)
     for (s, p) in zip(target_states, b_vec[i].b)
         t[s...] += p
     end
-        
+
     hr = heatmap(0.5 .+ (1:10), 0.5 .+ (1:7), f.(r)'; c = Plots.cgrad(:roma), clim=(0,1))
     ht = heatmap(0.5 .+ (1:10), 0.5 .+ (1:7), f.(t)'; c = Plots.cgrad(:roma), clim=(0,1))
-    
+
     obs = stack([pomdp.obstacles...])
     robot_pos = s_vec[i].robot
     target_pos = s_vec[i].target
@@ -226,12 +231,11 @@ anim = Plots.@animate for i in eachindex(b_vec)
         plot!(p, [0.5 + target_pos[1]], [0.5 + target_pos[2]]; markershape=:star5, common...)
         plot!(p, 0.5 .+ obs[1,:], 0.5 .+ obs[2,:]; markershape=:x, common...)
     end
-    
+
     plot!(hr, colorbar=nothing, title="Robot Belief")
     plot!(ht, colorbar=nothing, title="Target Belief")
-    
+
     plot(hr, ht; layout=(1,2), size=(800,400))
 end
 
 gif(anim, "examples/belief.gif", fps = 1)
-

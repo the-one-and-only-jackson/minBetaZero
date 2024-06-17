@@ -5,7 +5,7 @@ Base.@kwdef struct GumbelSolver{RNG<:AbstractRNG, DA, F} <: Solver
     k_o::Float64            = 10.0
     alpha_o::Float64        = 0.0 # Observation Progressive widening parameter
     rng::RNG                = Random.default_rng()
-    default_action::DA      = (pomdp::POMDP, ::Any) -> rand(rng, actions(pomdp))
+    default_action::DA      = (mdp::MDP, ::Any) -> rand(rng, actions(mdp))
     resample::Bool          = true
     cscale::Float64         = 1.
     cvisit::Float64         = 50.
@@ -13,15 +13,15 @@ Base.@kwdef struct GumbelSolver{RNG<:AbstractRNG, DA, F} <: Solver
     getpolicyvalue::F
 end
 
-@kwdef struct GumbelPlanner{SOL<:GumbelSolver, M<:POMDP, TREE<:GuidedTree, S, OA} <: Policy
-    pomdp::M
+@kwdef struct GumbelPlanner{SOL<:GumbelSolver, M<:MDP, TREE<:GuidedTree, S, OA} <: Policy
+    mdp::M
     sol::SOL
     tree::TREE
     cache::BeliefCache{S}
-    ordered_actions::OA = POMDPTools.ordered_actions(pomdp)
-    live_actions::BitVector = falses(length(actions(pomdp)))
+    ordered_actions::OA = POMDPTools.ordered_actions(mdp)
+    live_actions::BitVector = falses(length(actions(mdp)))
     q_extrema::Vector{Float64} = [Inf, -Inf]
-    noisy_logits::Vector{Float64} = zeros(length(actions(pomdp)))
+    noisy_logits::Vector{Float64} = zeros(length(actions(mdp)))
     target_N::SeqHalf = SeqHalf(; n=sol.tree_queries, m=sol.m_acts_init)
 end
 
@@ -40,17 +40,17 @@ function update_dq!(planner::GumbelPlanner, q)
     return nothing
 end
 
-function POMDPs.solve(sol::GumbelSolver, pomdp::POMDP{S,A}) where {S,A}
+function POMDPs.solve(sol::GumbelSolver, mdp::MDP{S,A}) where {S,A}
     (; tree_queries, n_particles, k_o) = sol
     cache = BeliefCache{S}(tree_queries + 1, n_particles)
-    tree = GuidedTree{PFTBelief{S},Int}(tree_queries + 1, length(actions(pomdp)), k_o)
-    return GumbelPlanner(; pomdp, sol, tree, cache)
+    tree = GuidedTree{S,Int}(tree_queries + 1, length(actions(mdp)), k_o)
+    return GumbelPlanner(; mdp, sol, tree, cache)
 end
 
 POMDPs.action(planner::GumbelPlanner, b) = first(POMDPTools.action_info(planner, b))
 
 function POMDPTools.action_info(planner::GumbelPlanner, b_root)
-    (; tree, cache, sol, pomdp, ordered_actions, target_N) = planner
+    (; tree, cache, sol, mdp, ordered_actions, target_N) = planner
     (; rng, n_particles, default_action, max_time, tree_queries, getpolicyvalue) = sol
     (; Qha, Nha, b_children) = tree
 
@@ -59,10 +59,10 @@ function POMDPTools.action_info(planner::GumbelPlanner, b_root)
     free!(cache)
 
     s, w = gen_empty_belief(cache, n_particles)
-    particle_b_root = initialize_belief!(rng, s, w, pomdp, b_root)
+    particle_b_root = initialize_belief!(rng, s, w, mdp, b_root)
 
     if isterminalbelief(particle_b_root)
-        a = default_action(pomdp, b_root)
+        a = default_action(mdp, b_root)
         n_iter = 0
         tree = nothing
         Q_root = nothing
@@ -170,24 +170,11 @@ function mcts_forward(planner::GumbelPlanner, b_root)
     return b_querry, ba_idx, r, done
 end
 
-function gen_querry(planner::GumbelPlanner, b, a)
-    (; pomdp, sol, cache) = planner
-    (; rng, resample) = sol
-
-    p_idx = non_terminal_sample(rng, pomdp, b)
-    sample_s = particle(b, p_idx)
-    sample_sp, o, sample_r = @gen(:sp,:o,:r)(pomdp, sample_s, a, rng)
-
-    bp_particles, bp_weights = gen_empty_belief(cache, n_particles(b))
-
-    b_querry, r, _ = GenBelief(
-        rng, bp_particles, bp_weights, cache.resample,
-        pomdp, b, a, o, p_idx, sample_sp, sample_r, resample
-    )
-
-    done = isterminalbelief(b_querry)
-
-    return b_querry, r, done
+function gen_querry(planner::GumbelPlanner, s, a)
+    (; mdp, sol) = planner
+    sp, r = @gen(:sp, :r)(mdp, s, a, sol.rng)
+    done = isterminal(sp)
+    return sp, r, done
 end
 
 function mcts_backward!(planner::GumbelPlanner, b_querry, ba_idx, r, value, logits)
@@ -225,10 +212,10 @@ function mcts_backward_root!(planner::GumbelPlanner, logits)
 end
 
 function mcts_backward_nonroot!(planner::GumbelPlanner, b_idx::Int, ba_idx::Int, value::Real)
-    (; tree, pomdp) = planner
+    (; tree, mdp) = planner
     (; b_rewards, b_parent, ba_parent, Nh, Nha, Qha) = tree
 
-    gamma = discount(pomdp)
+    gamma = discount(mdp)
 
     while !iszero(ba_idx)
         value = b_rewards[b_idx] + gamma * value

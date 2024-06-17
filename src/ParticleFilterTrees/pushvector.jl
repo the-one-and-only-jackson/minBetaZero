@@ -35,11 +35,10 @@ end
 @inline Base.size(v::NestedPushVector) = (v.len, )
 
 function extend!(v::NestedPushVector{T}, n::Int) where {T}
-    ish = v.inner_sh
     prev_l = length(v.parent)
     resize!(v.parent, prev_l + n)
     for i in 1:n
-        v.parent[prev_l + i] = PushVector{T}(ish)
+        v.parent[prev_l + i] = PushVector{T}(v.inner_sh)
     end
     nothing
 end
@@ -63,10 +62,7 @@ function freenext!(v::NestedPushVector)
 end
 
 function Base.push!(v::NestedPushVector, x::PushVector)
-    v.len += 1
-    if v.len > length(v.parent)
-        extend!(v, v.len)
-    end
+    freenext!(v)
     v.parent[v.len] = x
     v
 end

@@ -22,4 +22,5 @@ export GuidedTree
 include("GumbelMCTS.jl")
 export GumbelSolver, GumbelPlanner
 
-end 
+
+end
