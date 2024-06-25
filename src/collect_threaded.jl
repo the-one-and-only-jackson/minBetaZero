@@ -1,5 +1,5 @@
 struct GPUQuerry{C<:Channel, QC<:Array{Float32}, QG<:CuArray, V<:Vector, P<:Matrix}
-    channels::Vector{C} 
+    channels::Vector{C}
     cpu_batched_querry::QC
     gpu_batched_querry::QG
     cpu_value::V
@@ -8,7 +8,7 @@ end
 
 function GPUQuerry(; sz::Tuple, na::Int, batchsize::Int)
     return GPUQuerry(
-        Channel[], 
+        Channel[],
         zeros(Float32, sz..., batchsize),
         CUDA.zeros(Float32, sz..., batchsize),
         zeros(Float32, batchsize),
@@ -27,11 +27,11 @@ end
 
 function gen_data_threaded(pomdp::POMDP, net, params::minBetaZeroParameters, buffer::DataBuffer)
     (; n_episodes, GumbelSolver_args, na, input_dims, inference_batchsize) = params
-    
+
     @sync begin
         progress = Progress(n_episodes)
         results_channel = Channel(n_episodes)
-    
+
         progresstaskref = Ref{Task}()
         storage_channel = Channel(n_episodes; spawn=true, taskref=progresstaskref, threadpool=:interactive) do ch
             for _ in 1:n_episodes
@@ -39,15 +39,15 @@ function gen_data_threaded(pomdp::POMDP, net, params::minBetaZeroParameters, buf
                 next!(progress)
             end
         end
-    
+
         querry_ch = Channel(n_episodes)
 
         worker_tasks = [threaded_worker(querry_ch, storage_channel, pomdp, params) for _ in 1:n_episodes]
-        
+
         net = LockedNetwork(gpu(net))
         sz = (input_dims..., GumbelSolver_args.n_particles)
         batchsize = inference_batchsize
-        
+
         gpu_tasks = Threads.@spawn gpu_worker(querry_ch, net; sz, na, batchsize)
         errormonitor(gpu_tasks)
 
@@ -72,9 +72,9 @@ function ch_to_buff(results_channel, buffer, n_episodes)
         data = take!(results_channel)
         steps += length(data.value_target)
         set_buffer!(
-            buffer; 
-            network_input = data.network_input, 
-            value_target  = data.value_target, 
+            buffer;
+            network_input = data.network_input,
+            value_target  = data.value_target,
             policy_target = data.policy_target
         )
         ret_vec[i] = data.returns
@@ -95,7 +95,7 @@ function threaded_worker(querry_ch::Channel, storage_channel::Channel, pomdp::PO
             out = take!(worker_ch)
             return (; value=out.value[], policy=vec(out.policy))
         end
-    
+
 
         solver = GumbelSolver(; getpolicyvalue, GumbelSolver_args...)
         planner = solve(solver, pomdp)
@@ -144,7 +144,7 @@ function _gpu_worker(querry_ch::Channel, net, Q::GPUQuerry)
 
     copyto!(Q.gpu_batched_querry, Q.cpu_batched_querry)
 
-    net_out = net(Q.gpu_batched_querry)
+    net_out = net(Q.gpu_batched_querry; logits=true)
 
     copyto!(Q.cpu_value, net_out.value)
     copyto!(Q.cpu_policy, net_out.policy)
@@ -159,5 +159,3 @@ function _gpu_worker(querry_ch::Channel, net, Q::GPUQuerry)
 
     return nothing
 end
-
-

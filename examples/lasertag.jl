@@ -63,7 +63,7 @@ params = minBetaZeroParameters(
         m_acts_init         = 2 # number of actions sampled at root
     ),
     t_max           = 250,
-    n_episodes      = 100, # per iteration
+    n_episodes      = 200, # per iteration
     n_iter          = 500,
     batchsize       = 1024,
     lr              = 1e-3,
@@ -73,16 +73,18 @@ params = minBetaZeroParameters(
     train_on_planning_b = true, # this should probably not be a parameter, force true
     n_planning_particles = 100, # match n_particles in Gumbel args
     train_device    = gpu,
-    train_intensity = 8, # 4-8 seems safe?
+    train_intensity = 8, # 4-12 seems safe?
     input_dims = (nx,), # pomdp dependent input dimension
     na = na, # pomdp dependent number of actions
     use_belief_reward = false,
     use_gumbel_target = true, # policy target
-    n_net_episodes = 25, # policy-only evalutions per iteration
+    n_net_episodes = 50, # policy-only evalutions per iteration
 
-    buff_cap        = 25_000,
-    warmup_steps    = 5_000
+    buff_cap        = 50_000,
+    warmup_steps    = 10_000
 )
+
+# ffres(64, gelu; p=0, k=4), ffres(64, gelu; p=0, k=4)
 
 moments_nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
     action_size         = na,
@@ -90,10 +92,10 @@ moments_nn_params = NetworkParameters( # These are POMDP specific! not general p
     critic_loss         = Flux.Losses.logitcrossentropy,
     critic_categories   = collect(range(-100, 100, length=128)),
     p_dropout           = 0.1,
-    neurons             = 128,
+    neurons             = 256,
     hidden_layers       = 1,
-    shared_net          = Chain(mean_std_layer, Dense(2nx=>128), ffres(128, gelu; p=0.1, k=4)),
-    shared_out_size     = (128,) # must manually set... fix at a later date...
+    shared_net          = Chain(mean_std_layer, Dense(2nx=>64), (ffres(64, gelu; p=0, k=4) for _ in 1:2)...),
+    shared_out_size     = (64,) # must manually set... fix at a later date...
 )
 
 cgf_nn_params = NetworkParameters( # These are POMDP specific! not general parameters - must input dimensions
@@ -102,30 +104,38 @@ cgf_nn_params = NetworkParameters( # These are POMDP specific! not general param
     critic_loss         = Flux.Losses.logitcrossentropy,
     critic_categories   = collect(range(-100, 100, length=128)),
     p_dropout           = 0.1,
-    neurons             = 128,
+    neurons             = 256,
     hidden_layers       = 2,
-    shared_net          = CGF(nx=>128),
-    shared_out_size     = (128,) # must manually set... fix at a later date...
+    shared_net          = Chain(CGF(nx=>64), ffres(64, gelu; p=0, k=4)),
+    shared_out_size     = (64,) # must manually set... fix at a later date...
 )
 
 # despot 48
 
-@time net_moment, info_moment = betazero(params, pomdp, ActorCritic(moments_nn_params));
+training_dict = Dict{Symbol,Vector{Float32}}()
+for d in info_moment[:training], (k,v) in d
+    append!(get!(training_dict, k, Vector{Float32}()), v)
+end
+plot([plot(v; ylabel=k, legend=false) for (k,v) in training_dict]..., layout=(2,2))
+
+plot(training_dict[:value_FVU]; legend=false, ylims=(0,2))
 
 p = plot(xlabel="Steps", title="Mean Episodic Return", legend=:bottomright, right_margin=4Plots.mm)
+
+@time net_moment, info_moment = betazero(params, pomdp, ActorCritic(moments_nn_params));
 
 x1 = info_moment[:steps] .- first(info_moment[:steps])
 y1 = info_moment[:returns]
 y2 = info_moment[:network_returns]
 
-plot_smoothing!(p, x1, y1; k=5, label="Moments - Tree", c=1)
-plot_smoothing!(p, x1, y2; k=5, label="Moments - Net", c=2)
+plot_smoothing!(p, x1, y1; k=5, nx=500, label="Moments - Tree - 2", c=3)
+plot_smoothing!(p, x1, y2; k=5, nx=500, label="Moments - Net - 2", c=4)
 
-y12_max = 5*ceil(maximum(max(maximum(y1), maximum(y2)))/5)
+xmax = maximum(series.plotattributes[:x_extrema][2] for series in p.series_list)
+ymax = maximum(series.plotattributes[:y_extrema][2] for series in p.series_list)
+plot!(ylims=(0,5*((ymax÷5)+1)), yticks=0:5:5*((ymax÷5)+1), xlims=(0,xmax), right_margin=5Plots.mm)
 
-plot!(ylims=(0,y12_max), yticks=0:5:y12_max, xlims=(0,maximum(x1)), right_margin=5Plots.mm)
-
-savefig("examples/moments_3.png")
+savefig("examples/moments_4.png")
 
 
 @time net_cgf, info_cgf = betazero(params, pomdp, ActorCritic(cgf_nn_params));
@@ -134,14 +144,14 @@ x2 = info_cgf[:steps] .- first(info_cgf[:steps])
 y3 = info_cgf[:returns]
 y4 = info_cgf[:network_returns]
 
-plot_smoothing!(p, x2, y3; k=5, label="CGF - Tree", c=3)
-plot_smoothing!(p, x2, y4; k=5, label="CGF - Net", c=4)
+plot_smoothing!(p, x2, y3; k=5, label="CGF - Tree", c=5)
+plot_smoothing!(p, x2, y4; k=5, label="CGF - Net", c=6)
 
-y34_max = 5*ceil(maximum(max(maximum(y3), maximum(y4)))/5)
+xmax = maximum(series.plotattributes[:x_extrema][2] for series in p.series_list)
+ymax = maximum(series.plotattributes[:y_extrema][2] for series in p.series_list)
+plot!(ylims=(0,5*((ymax÷5)+1)), yticks=0:5:5*((ymax÷5)+1), xlims=(0,xmax), right_margin=5Plots.mm)
 
-plot!(ylims=(0,max(y12_max,y34_max)), yticks=0:5:max(y12_max,y34_max), xlims=(0,max(maximum.((x1,x2))...)), right_margin=5Plots.mm)
-
-savefig("examples/moments_cgf_2.png")
+savefig("examples/moments_cgf_4.png")
 
 y_rand = -68.4 # recalculate for given pomdp
 y_qmdp = 23.0 # recalculate for given pomdp
@@ -205,7 +215,7 @@ r_total = sum(r_vec .* discount(pomdp) .^ (0:length(r_vec)-1))
 println("Epsidoic Return: $r_total")
 
 
-f(x) = max(0, 1+log10(x)/3)
+f(x) = max(0, 1+log10(x)/4)
 common = (label=false, seriestype=:scatter, markercolor=:black, markersize=10, xticks=(1.5:10.5, 1:10), yticks=(1.5:7.5, 1:7), xlims=(1,11), ylims=(1,8))
 robot_states = [s.robot for s in b_vec[1].state_list]
 target_states = [s.target for s in b_vec[1].state_list]

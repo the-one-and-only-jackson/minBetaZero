@@ -10,8 +10,8 @@
 - `s_parent` - History node parent of action node child
 - `sa_parent` - Action node parent of history node child
 - `prior_value` - Value of state node (prior)
-- `prior_policy` - Policy of state node (prior)
 - `prior_logits` - Logits of state node (prior)
+- `improved_policy` - Posteriro policy of state node. Used as a temporary variable
 ...
 """
 struct GuidedTree{S, A}
@@ -28,11 +28,11 @@ struct GuidedTree{S, A}
     sa_parent::PV{Int}
 
     prior_value::PV{Float64}
-    prior_policy::PV{Vector{Float32}}
-    prior_logits::PV{Vector{Float32}}
+    prior_logits::Matrix{Float32}
+    improved_policy::Vector{Float32} # recalculated each node, never saved
 
     function GuidedTree{S,A}(sz::Int, na::Int, k_o::Int) where {S, A}
-        return new(
+        return new{S, A}(
             PushVector{Int}(sz),
             PushVector{Int}(sz),
             PushVector{Float64}(sz),
@@ -40,40 +40,38 @@ struct GuidedTree{S, A}
             PushVector{S}(sz),
             PushVector{Float64}(sz),
 
-            NestedPushVector{Pair{A,Int}}(ceil(Int, k_o), sz),
+            NestedPushVector{Pair{A,Int}}(k_o, sz),
             NestedPushVector{Int}(na, sz),
             PushVector{Int}(sz),
-            PushVector{Int}(sz)
+            PushVector{Int}(sz),
 
             PushVector{Float64}(sz),
-            PushVector{Vector{Float32}}(sz),
-            PushVector{Vector{Float32}}(sz),
+            Matrix{Float32}(undef, na, sz),
+            Vector{Float32}(undef, na),
         )
     end
 end
 
 function reset_tree!(tree::GuidedTree)
-    foreach(propertynames(tree)) do name
-        empty!(getfield(tree, name))
-    end
+    empty!(tree.Nh)
+    empty!(tree.Nha)
+    empty!(tree.Qha)
+    empty!(tree.s)
+    empty!(tree.s_rewards)
+    empty!(tree.s_children)
+    empty!(tree.sa_children)
+    empty!(tree.s_parent)
+    empty!(tree.sa_parent)
+    empty!(tree.prior_value)
+    return nothing
 end
 
-function insert_belief!(tree::GuidedTree{S}, s::S;
-    logits::Vector{<:Real} = log.(policy),
-    policy::Vector{<:Real} = softmax(logits),
-    value::Real = 0.0,
-    r::Real     = 0.0,
-    sa_idx::Int = 0 # parent, 0 for root
-    ) where S
-
+function insert_state!(tree::GuidedTree{S}, s::S, sa_idx::Int, r::Real) where S
     s_idx = 1 + length(tree.s)
 
     push!(tree.s, s)
     push!(tree.Nh, 0)
     push!(tree.s_rewards, r)
-    push!(tree.prior_value, value)
-    push!(tree.prior_logits, logits)
-    push!(tree.prior_policy, policy)
     push!(tree.sa_parent, sa_idx)
     iszero(sa_idx) || push!(tree.sa_children[sa_idx], s_idx)
 

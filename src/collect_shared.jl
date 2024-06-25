@@ -137,8 +137,8 @@ function work_fun(pomdp, planner, params)
 
     if use_gumbel_target
         policy_target = reduce(hcat, gumbel_target_vec)
-        # value_target = reshape(tree_value_target, 1, :)
-        value_target  = reshape(output_reward, 1, :)
+        value_target = reshape(tree_value_target, 1, :)
+        # value_target  = reshape(output_reward, 1, :)
     else
         policy_target = Flux.onehotbatch(aid_vec, 1:length(actions(pomdp)))
         value_target  = reshape(output_reward, 1, :)
