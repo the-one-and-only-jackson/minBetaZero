@@ -4,7 +4,7 @@
 - `Nha` - Number of times action node has been visited
 - `Qha` - Q value associated with some action node
 - `s` - MDP State associated with some history node
-- `s_rewards` - R(s,a,s') where index is ID of s' where s' = τ(s,a,o)
+- `rewards` - R(s,a,s') where index is ID of s' where s' = τ(s,a,o)
 - `s_children` - Mapping state ID to (action, action ID) pair
 - `sa_children` - `sa_idx => [bp_idx, bp_idx, bp_idx, ...]`
 - `s_parent` - History node parent of action node child
@@ -15,55 +15,81 @@
 ...
 """
 struct GuidedTree{S, A}
-    Nh::PV{Int}
-    Nha::PV{Int}
-    Qha::PV{Float64}
+    Nh              :: Vector{Int}
+    Nha             :: Vector{Int}
+    Qha             :: Vector{Float64}
 
-    s::PV{S}
-    s_rewards::PV{Float64}
+    s               :: Vector{S}
+    rewards         :: Vector{Float64}
 
-    s_children::NPV{Pair{A, Int}}
-    sa_children::NPV{Int}
-    s_parent::PV{Int}
-    sa_parent::PV{Int}
+    s_children      :: Vector{Vector{Tuple{A, Int}}}
+    sa_children     :: Vector{Vector{Int}}
 
-    prior_value::PV{Float64}
-    prior_logits::Matrix{Float32}
-    improved_policy::Vector{Float32} # recalculated each node, never saved
+    s_parent        :: Vector{Int}
+    sa_parent       :: Vector{Int}
+
+    prior_value     :: Vector{Float64}
+    prior_logits    :: Matrix{Float32}
+    improved_policy :: Vector{Float32} # recalculated each node, never saved
 
     function GuidedTree{S,A}(sz::Int, na::Int, k_o::Int) where {S, A}
+        Nh = Vector{Int}()
+        Nha = Vector{Int}()
+        Qha = Vector{Float64}()
+
+        s = Vector{S}()
+        rewards = Vector{Float64}()
+
+        s_children = [Vector{Tuple{A, Int}}() for _ in 1:sz]
+        sa_children = [Vector{Int}() for _ in 1:sz]
+
+        s_parent = Vector{Int}()
+        sa_parent = Vector{Int}()
+
+        prior_value = Vector{Float64}()
+        prior_logits = Matrix{Float32}(undef, na, sz)
+        improved_policy = Vector{Float32}(undef, na)
+
+        for x in (Nh, Nha, Qha, s, rewards, s_children, s_parent, sa_parent, prior_value)
+            sizehint!(x, sz)
+        end
+
+        for x in s_children
+            sizehint!(x, k_o)
+        end
+
+        for x in sa_children
+            sizehint!(x, na)
+        end
+
         return new{S, A}(
-            PushVector{Int}(sz),
-            PushVector{Int}(sz),
-            PushVector{Float64}(sz),
+            Nh,
+            Nha,
+            Qha,
 
-            PushVector{S}(sz),
-            PushVector{Float64}(sz),
+            s,
+            rewards,
 
-            NestedPushVector{Pair{A,Int}}(k_o, sz),
-            NestedPushVector{Int}(na, sz),
-            PushVector{Int}(sz),
-            PushVector{Int}(sz),
+            s_children,
+            sa_children,
 
-            PushVector{Float64}(sz),
-            Matrix{Float32}(undef, na, sz),
-            Vector{Float32}(undef, na),
+            s_parent,
+            sa_parent,
+
+            prior_value,
+            prior_logits,
+            improved_policy
         )
     end
 end
 
 function reset_tree!(tree::GuidedTree)
-    empty!(tree.Nh)
-    empty!(tree.Nha)
-    empty!(tree.Qha)
-    empty!(tree.s)
-    empty!(tree.s_rewards)
-    empty!(tree.s_children)
-    empty!(tree.sa_children)
-    empty!(tree.s_parent)
-    empty!(tree.sa_parent)
-    empty!(tree.prior_value)
-    return nothing
+    (; Nh, Nha, Qha, s, rewards, s_children, sa_children, s_parent, sa_parent, prior_value) = tree
+    foreach(empty!, (Nh, Nha, Qha, s, rewards, s_parent, sa_parent, prior_value))
+    foreach(empty!, s_children)
+    foreach(empty!, sa_children)
+    # GC.gc(false)
+    return
 end
 
 function insert_state!(tree::GuidedTree{S}, s::S, sa_idx::Int, r::Real) where S
@@ -71,11 +97,10 @@ function insert_state!(tree::GuidedTree{S}, s::S, sa_idx::Int, r::Real) where S
 
     push!(tree.s, s)
     push!(tree.Nh, 0)
-    push!(tree.s_rewards, r)
+    push!(tree.rewards, r)
     push!(tree.sa_parent, sa_idx)
-    iszero(sa_idx) || push!(tree.sa_children[sa_idx], s_idx)
 
-    freenext!(tree.s_children)
+    iszero(sa_idx) || push!(tree.sa_children[sa_idx], s_idx)
 
     return s_idx
 end
@@ -89,14 +114,12 @@ function insert_action!(tree::GuidedTree{S,A}, s_idx::Int, a::A;
         _a == a && return sa_idx
     end
 
-    sa_idx = 1 + length(tree.sa_children)
+    sa_idx = 1 + length(tree.Nha)
 
-    push!(tree.s_children[s_idx], a=>sa_idx)
+    push!(tree.s_children[s_idx], (a, sa_idx))
     push!(tree.Nha, Na_init)
     push!(tree.Qha, Q_init)
     push!(tree.s_parent, s_idx)
-
-    freenext!(tree.sa_children)
 
     return sa_idx
 end

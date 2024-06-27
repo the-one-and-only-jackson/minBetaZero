@@ -1,26 +1,19 @@
-mutable struct History{S, P <: AbstractVector, V <: AbstractFloat}
-    state           :: Vector{S}
-    reward          :: Vector{V}
-    value_target    :: Vector{V}
-    policy_target   :: Vector{P}
-    steps           :: Int
-    episode_reward  :: V
-    discount        :: V
+@kwdef mutable struct History{S, T <: Real}
+    state           :: Vector{S}         = S[]
+    reward          :: Vector{T}         = T[]
+    value_target    :: Vector{T}         = T[]
+    policy_target   :: Vector{Vector{T}} = Vector{T}[]
+    steps           :: Int               = 0
+    episode_reward  :: T                 = zero(T)
+    discount        :: T                 = one(T)
     current_state   :: S
-
-    function History{S, P, V}(state, reward, value_target, policy_target, steps, episode_reward, discount, current_state) where {S, P, V}
-        return new{S,P,V}(state, reward, value_target, policy_target, steps, episode_reward, discount, current_state)
-    end
-
-    function History{S, P, V}(current_state::S, discount = 1) where {S, P, V}
-        return new{S,P,V}(S[], V[], V[], P[], 0, zero(V), V(discount), current_state)
-    end
-    History{S, P}(current_state::S, discount = 1) where {S, P} = History{S, P, Float32}(current_state, discount)
-    History{S}(current_state::S, discount = 1) where S = History{S, Vector{Float32}}(current_state, discount)
 end
-History(m::MDP{S}, current_state::S) where S = History{S}(current_state, discount(m))
 
-function copy_and_reset!(h::H, newstate::S) where {S, P, V, H <: History{S, P, V}}
+function History(m::MDP{S}, current_state::S) where S
+    History{S, Float32}(; current_state, discount = Float32(discount(m)))
+end
+
+function copy_and_reset!(h::H, newstate::S) where {S, T, H <: History{S, T}}
     new_h = H(
         h.state,
         h.reward,
@@ -32,9 +25,9 @@ function copy_and_reset!(h::H, newstate::S) where {S, P, V, H <: History{S, P, V
         h.current_state
     )
     h.state = S[]
-    h.reward = V[]
-    h.value_target = V[]
-    h.policy_target = P[]
+    h.reward = T[]
+    h.value_target = T[]
+    h.policy_target = Vector{T}[]
     h.steps = 0
     h.episode_reward = 0
     h.current_state = newstate

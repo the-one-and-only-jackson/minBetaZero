@@ -1,3 +1,26 @@
+struct MDPAgent{S, A, M <: MDP, RNG <: AbstractRNG}
+    mdp     :: M
+    mcts    :: GumbelSearch{S, A, M, RNG}
+    rng     :: RNG
+    history :: History{S, Float32}
+end
+
+function MDPAgent(mdp::MDP; rng::AbstractRNG = Random.default_rng(), kwargs...)
+    mcts    = GumbelSearch(mdp; rng, kwargs...)
+    state   = rand(rng, initialstate(mdp))
+    history = History(mdp, state)
+    agent   = MDPAgent(mdp, mcts, rng, history)
+    return agent
+end
+
+function initialize_agent!(agent::MDPAgent)
+    (; mcts, history) = agent
+    insert_root!(mcts, history.current_state)
+    s_querry = mcts_forward!(mcts)
+    return s_querry
+end
+
+
 struct Worker{AC, A <: MDPAgent, B <: BatchManager, H <: History}
     agents          :: Vector{A}
     batch_manager   :: B
@@ -7,7 +30,7 @@ struct Worker{AC, A <: MDPAgent, B <: BatchManager, H <: History}
 end
 
 function Worker(; mdp::MDP, actor_critic, n_agents::Int, batchsize::Int=n_agents, kwargs...)
-    @assert n_agents >= batchsize
+    @assert n_agents >= batchsize >= Threads.nthreads() - 2
 
     agents = [MDPAgent(mdp; kwargs...) for _ in 1:n_agents]
 
@@ -16,8 +39,7 @@ function Worker(; mdp::MDP, actor_critic, n_agents::Int, batchsize::Int=n_agents
     na        = length(actions(mdp))
     batch_manager = BatchManager(n_batches, batchsize, in_size, na)
 
-    H = History{statetype(mdp), Vector{Float32}, Float32}
-    history_channel = Channel{H}(n_agents)
+    history_channel = Channel{History{statetype(mdp), Float32}}(n_agents)
 
     for (agent_idx, agent) in enumerate(agents)
         s_querry = initialize_agent!(agent)
@@ -38,9 +60,28 @@ function worker_main(worker::Worker; n_steps::Int = 10_000)
         # dont start workers until the first response is ready, otherwise wont work
         wait(worker.batch_manager.batches[1].response_ready)
 
-        for _ in 1:Threads.nthreads() - 2
-            errormonitor(Threads.@spawn agent_worker(worker, stop_flag))
-        end
+        errormonitor(Threads.@spawn begin
+            querries_per_step = length(worker.agents) * (1 + worker.agents[1].mcts.tree_querries)
+
+            counter = 0
+
+            while !stop_flag[]
+                if !response_ready(worker.batch_manager)
+                    GC.safepoint()
+                    continue
+                end
+
+                @sync for _ in 1:worker.batch_manager.batchsize
+                    Threads.@spawn process_agent(worker)
+                end
+
+                counter += worker.batch_manager.batchsize
+                if counter >= querries_per_step
+                    counter -= querries_per_step
+                    GC.gc(false)
+                end
+            end
+        end)
 
         episode_returns, histories = fetch(Threads.@spawn history_worker(worker, n_steps))
 
@@ -59,7 +100,7 @@ function history_worker(worker::Worker{AC, A, B, H}, n_steps::Int) where {AC, A,
         steps_taken += length(hist.state)
         push!(episode_returns, hist.episode_reward)
         push!(histories, hist)
-        println("steps taken: $steps_taken")
+        # println("steps taken: $steps_taken")
     end
     return episode_returns, histories
 end
@@ -70,9 +111,7 @@ function actor_critic_worker(worker::Worker, stop_flag::Threads.Atomic{Bool})
             process_batch!(worker.batch_manager, worker.actor_critic)
         end
         GC.safepoint()
-        yield()
     end
-    println("AC exited gracefully")
     return nothing
 end
 
@@ -82,9 +121,7 @@ function agent_worker(worker::Worker, stop_flag::Threads.Atomic{Bool})
             process_agent(worker)
         end
         GC.safepoint()
-        yield()
     end
-    println("Worker exited gracefully")
     return nothing
 end
 
@@ -93,10 +130,40 @@ function process_agent(worker::Worker)
 
     agent_idx, value, policy = get_response!(batch_manager)
     agent = worker.agents[agent_idx]
-    s_querry, history = agent_main!(agent, value, policy)
+
+    mcts_backward!(agent.mcts, value, policy)
+
+    if Base.isdone(agent.mcts)
+        step_agent!(agent, history_channel)
+    end
+
+    s_querry = mcts_forward!(agent.mcts)
     set_querry!(batch_manager, agent_idx, s_querry)
 
-    isnothing(history) || put!(history_channel, history)
+    return nothing
+end
 
-    return
+function step_agent!(agent::MDPAgent, history_channel::Channel)
+    (; mdp, mcts, rng, history) = agent
+
+    a, a_info = root_info(mcts)
+    sp, reward = @gen(:sp, :r)(mdp, history.current_state, a, rng)
+
+    push!(history;
+        sp,
+        reward,
+        policy_target = a_info.policy_target,
+        value_target  = a_info.value_target
+    )
+
+    if isterminal(mdp, sp) || length(history.state) >= 250
+        calculate_value_target(history)
+        newstate = rand(rng, initialstate(mdp))
+        history_copy = copy_and_reset!(history, newstate)
+        put!(history_channel, history_copy)
+    end
+
+    insert_root!(mcts, history.current_state)
+
+    return nothing
 end

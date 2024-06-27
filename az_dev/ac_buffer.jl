@@ -54,7 +54,7 @@ function set_querry!(bm::BatchManager, agent_idx::Int, querry)
 
     batch = batches[batch_idx]
 
-    batch.cpu_querry[:, local_idx] .= querry
+    batch.cpu_querry[:, local_idx] .= querry.value # weakref
     batch.agent_idxs[local_idx] = agent_idx
 
     n_ready = 1 + Threads.atomic_add!(batch.ready_count, 1)
@@ -62,7 +62,7 @@ function set_querry!(bm::BatchManager, agent_idx::Int, querry)
         Threads.notify(batch.querry_ready)
     end
 
-    return
+    return nothing
 end
 
 function get_response!(bm::BatchManager)
@@ -110,7 +110,7 @@ function process_batch!(bm::BatchManager, ac)
     reset(batch.querry_ready)
     Threads.atomic_add!(gpu_batch_idx, 1)
 
-    return
+    return nothing
 end
 
 querry_ready(batch::ACBatch) = @atomic batch.querry_ready.set

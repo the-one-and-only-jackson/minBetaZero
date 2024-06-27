@@ -14,7 +14,6 @@ mutable struct GumbelSearch{S, A, M, RNG}
     rng             :: RNG
 
     s_idx           :: Int
-    waiting         :: Bool
 
     function GumbelSearch(mdp :: M;
             tree_querries :: Real = length(actions(mdp)),
@@ -28,7 +27,7 @@ mutable struct GumbelSearch{S, A, M, RNG}
 
         na = length(actions(mdp))
 
-        tree_querries   = 1 + floor(Int, tree_querries) # root querry addition
+        tree_querries   = floor(Int, tree_querries) # root querry addition
         ordered_actions = POMDPTools.ordered_actions(mdp)
         m_acts_init     = floor(Int, m_acts_init)
         live_actions    = falses(na)
@@ -44,7 +43,6 @@ mutable struct GumbelSearch{S, A, M, RNG}
         tree = GuidedTree{S, Int}(tree_querries + 1, na, ceil(Int, k_o))
 
         s_idx   = 1
-        waiting = false
 
         return new{S, A, M, RNG}(
             mdp,
@@ -61,7 +59,6 @@ mutable struct GumbelSearch{S, A, M, RNG}
             cvisit,
             rng,
             s_idx,
-            waiting
         )
     end
 end
@@ -106,11 +103,10 @@ end
 function mcts_forward!(planner::GumbelSearch)
     if isempty(planner.tree.s_children[1])
         planner.s_idx = 1
-        s_querry = planner.tree.s[planner.s_idx]
+        s_querry = WeakRef(planner.tree.s[planner.s_idx])
     else
         s_querry, planner.s_idx = mcts_forward_nonroot!(planner)
     end
-    planner.waiting = true
     return s_querry
 end
 
@@ -143,13 +139,11 @@ function mcts_forward_nonroot!(planner::GumbelSearch)
         end
     end
 
-    return s_querry, s_idx
+    return WeakRef(s_querry), s_idx
 end
 
 function mcts_backward!(planner::GumbelSearch, value, logits)
     (; s_idx, tree) = planner
-
-    planner.waiting = false
 
     push!(tree.prior_value, value)
     tree.prior_logits[:, s_idx] .= logits
@@ -193,7 +187,7 @@ end
 
 function mcts_backward_nonroot!(planner::GumbelSearch)
     (; tree, mdp) = planner
-    (; s_rewards, s_parent, sa_parent, Nh, Nha, Qha, prior_value) = tree
+    (; rewards, s_parent, sa_parent, Nh, Nha, Qha, prior_value) = tree
 
     gamma = discount(mdp)
 
@@ -203,7 +197,7 @@ function mcts_backward_nonroot!(planner::GumbelSearch)
     value = prior_value[s_idx]
 
     while !iszero(sa_idx)
-        value = s_rewards[s_idx] + gamma * value
+        value = rewards[s_idx] + gamma * value
 
         Nha[sa_idx] += 1
         Qha[sa_idx] += (value - Qha[sa_idx]) / Nha[sa_idx]
@@ -223,14 +217,10 @@ function select_root_action!(planner::GumbelSearch)
     (; tree, live_actions, target_N) = planner
     (; Nha, s_children) = tree
 
-    halving_flag = true
-
-    for (ai, sa_idx) in s_children[1]
-        if live_actions[ai] && Nha[sa_idx] < target_N.N
-            halving_flag = false
-            break
-        end
-    end
+    halving_flag = !any(
+        live_actions[ai] && Nha[sa_idx] < target_N.N
+        for (ai, sa_idx) in s_children[1]
+    )
 
     if halving_flag
         next!(target_N)
