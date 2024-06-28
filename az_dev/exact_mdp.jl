@@ -70,25 +70,27 @@ function sample_obs(rng, pomdp, b, a, state_space, T)
 
     Trows = rowvals(T)
     Tvals = nonzeros(T)
-    idxs = nzrange(T, si)
+    idxs  = nzrange(T, si)
 
     spi = sampleindex(rng, Tvals, first(idxs), last(idxs))
-    sp = state_space[Trows[spi]]
+    sp  = state_space[Trows[spi]]
 
-    o = rand(rng, observation(pomdp, a, sp))
-
-    return o
+    return rand(rng, observation(pomdp, a, sp))
 end
 
 sampleindex(rng, b) = sampleindex(rng, b, 1, length(b))
 function sampleindex(rng::AbstractRNG, b::AbstractVector{T}, first::Int, last::Int) where T
-    u = rand(rng, T) * sum(@view b[first:last])
-    i = first - 1
-    while i < last && u > zero(T)
-        i += 1
+    @assert first <= last "first $first > last $last"
+    first == last && return first
+
+    sb = sum(@view b[first:last])
+    @assert sb > 0 "$sb, $first, $last"
+    u = rand(rng, T) * sb
+    for i in first:last
         @inbounds u -= b[i]
+        u <= 0 && return i
     end
-    return i
+    return last
 end
 
 

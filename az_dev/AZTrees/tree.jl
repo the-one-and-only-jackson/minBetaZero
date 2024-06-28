@@ -3,123 +3,175 @@
 - `Nh` - Number of times history node has been visited
 - `Nha` - Number of times action node has been visited
 - `Qha` - Q value associated with some action node
-- `s` - MDP State associated with some history node
-- `rewards` - R(s,a,s') where index is ID of s' where s' = τ(s,a,o)
+- `states` - MDP State associated with some history node
+- `reward` - R(s,a,s') where index is ID of s'
 - `s_children` - Mapping state ID to (action, action ID) pair
 - `sa_children` - `sa_idx => [bp_idx, bp_idx, bp_idx, ...]`
-- `s_parent` - History node parent of action node child
-- `sa_parent` - Action node parent of history node child
 - `prior_value` - Value of state node (prior)
 - `prior_logits` - Logits of state node (prior)
-- `improved_policy` - Posteriro policy of state node. Used as a temporary variable
 ...
 """
-struct GuidedTree{S, A}
-    Nh              :: Vector{Int}
-    Nha             :: Vector{Int}
-    Qha             :: Vector{Float64}
+mutable struct GuidedTree{S, TInt, TFloat}
+    const Nh            :: Vector{TInt}
+    const Nha           :: Vector{TInt}
+    const Qha           :: Vector{TFloat}
+    const reward        :: Vector{TFloat}
+    const s_children    :: Matrix{TInt}
+    const sa_children   :: Matrix{TInt}
+    const prior_value   :: Vector{TFloat}
+    const prior_logits  :: Matrix{TFloat}
+    const node_stack    :: Vector{TInt} # [sa, s, ...]
 
-    s               :: Vector{S}
-    rewards         :: Vector{Float64}
+    state       :: Vector{S}
 
-    s_children      :: Vector{Vector{Tuple{A, Int}}}
-    sa_children     :: Vector{Vector{Int}}
+    stack_index :: TInt
+    s_counter   :: TInt
+    sa_counter  :: TInt
+    qmin        :: TFloat
+    qmax        :: TFloat
 
-    s_parent        :: Vector{Int}
-    sa_parent       :: Vector{Int}
+    function GuidedTree{S, TInt, TFloat}(sz, na, k_o) where {S, TInt, TFloat}
+        new{S, TInt, TFloat}(
+            zeros(TInt, sz),
+            zeros(TInt, sz),
+            zeros(TFloat, sz),
+            zeros(TFloat, sz),
+            zeros(TInt, na, sz),
+            zeros(TInt, k_o, sz),
+            zeros(TFloat, sz),
+            zeros(TFloat, na, sz),
+            zeros(TInt, 2*sz),
 
-    prior_value     :: Vector{Float64}
-    prior_logits    :: Matrix{Float32}
-    improved_policy :: Vector{Float32} # recalculated each node, never saved
+            Vector{S}(undef, sz),
 
-    function GuidedTree{S,A}(sz::Int, na::Int, k_o::Int) where {S, A}
-        Nh = Vector{Int}()
-        Nha = Vector{Int}()
-        Qha = Vector{Float64}()
-
-        s = Vector{S}()
-        rewards = Vector{Float64}()
-
-        s_children = [Vector{Tuple{A, Int}}() for _ in 1:sz]
-        sa_children = [Vector{Int}() for _ in 1:sz]
-
-        s_parent = Vector{Int}()
-        sa_parent = Vector{Int}()
-
-        prior_value = Vector{Float64}()
-        prior_logits = Matrix{Float32}(undef, na, sz)
-        improved_policy = Vector{Float32}(undef, na)
-
-        for x in (Nh, Nha, Qha, s, rewards, s_children, s_parent, sa_parent, prior_value)
-            sizehint!(x, sz)
-        end
-
-        for x in s_children
-            sizehint!(x, k_o)
-        end
-
-        for x in sa_children
-            sizehint!(x, na)
-        end
-
-        return new{S, A}(
-            Nh,
-            Nha,
-            Qha,
-
-            s,
-            rewards,
-
-            s_children,
-            sa_children,
-
-            s_parent,
-            sa_parent,
-
-            prior_value,
-            prior_logits,
-            improved_policy
+            zero(TInt),
+            zero(TInt),
+            zero(TInt),
+            typemax(TFloat),
+            typemin(TFloat)
         )
+    end
+
+    function GuidedTree{S}(sz, na, k_o) where {S}
+        return GuidedTree{S, Int64, Float64}(sz, na, k_o)
     end
 end
 
-function reset_tree!(tree::GuidedTree)
-    (; Nh, Nha, Qha, s, rewards, s_children, sa_children, s_parent, sa_parent, prior_value) = tree
-    foreach(empty!, (Nh, Nha, Qha, s, rewards, s_parent, sa_parent, prior_value))
-    foreach(empty!, s_children)
-    foreach(empty!, sa_children)
-    # GC.gc(false)
-    return
+function reset!(tree::GuidedTree)
+    fill!(tree.Nh , 0)
+    fill!(tree.Nha, 0)
+    fill!(tree.Qha, 0)
+    fill!(tree.s_children, 0)
+    fill!(tree.sa_children, 0)
+
+    tree.state = Vector{eltype(tree.state)}(undef, length(tree.state))
+
+    tree.s_counter  = 0
+    tree.sa_counter = 0
+    tree.qmin = typemax(tree.qmin)
+    tree.qmax = typemin(tree.qmin)
+
+    return nothing
 end
 
-function insert_state!(tree::GuidedTree{S}, s::S, sa_idx::Int, r::Real) where S
-    s_idx = 1 + length(tree.s)
+function insert_state!(tree::GuidedTree{S}, s::S, sa_idx::Integer = 0, r::Real = 0) where S
+    s_idx = tree.s_counter += one(tree.s_counter)
 
-    push!(tree.s, s)
-    push!(tree.Nh, 0)
-    push!(tree.rewards, r)
-    push!(tree.sa_parent, sa_idx)
+    tree.state[s_idx]  = s
+    tree.reward[s_idx] = r
 
-    iszero(sa_idx) || push!(tree.sa_children[sa_idx], s_idx)
+    if !iszero(sa_idx) # if not root
+        index = findfirst(iszero, @view tree.sa_children[:, sa_idx])
+        @assert !isnothing(index) "sa_children at sa_idx = $sa_idx is full"
+        tree.sa_children[index, sa_idx] = s_idx
+    end
 
     return s_idx
 end
 
-function insert_action!(tree::GuidedTree{S,A}, s_idx::Int, a::A;
-    Q_init::Real = 0.0,
-    Na_init::Int = 0
-    ) where {S,A}
+function insert_action!(tree::GuidedTree, s_idx::Integer, ai::Integer)
+    sa_idx = tree.s_children[ai, s_idx]
+    if iszero(sa_idx)
+        sa_idx = tree.sa_counter += one(tree.sa_counter)
+        tree.s_children[ai, s_idx] = sa_idx
+    end
+    return sa_idx
+end
 
-    for (_a, sa_idx) in tree.s_children[s_idx]
-        _a == a && return sa_idx
+function update_prior!(tree::GuidedTree, s_idx::Integer, logits, value)
+    tree.prior_logits[:, s_idx] .= logits
+    tree.prior_value[s_idx] = value
+    update_dq!(tree, value)
+    return nothing
+end
+
+function update_dq!(tree::GuidedTree, q)
+    if q < tree.qmin
+        tree.qmin = q
+    end
+    if q > tree.qmax
+        tree.qmax = q
+    end
+    return nothing
+end
+
+function get_dq(tree::GuidedTree, s_idx::Integer; eps=1e-6, global_dq::Bool=true)
+    if global_dq
+        qmin = tree.qmin
+        qmax = tree.qmax
+    else
+        qmin = tree.prior_value[s_idx]
+        qmax = tree.prior_value[s_idx]
+
+        for (_, sa_idx) in s_children(tree, s_idx)
+            Q = tree.Qha[sa_idx]
+            if Q < qmin
+                qmin = Q
+            elseif Q > qmax
+                qmax = Q
+            end
+        end
     end
 
-    sa_idx = 1 + length(tree.Nha)
+    dq = qmax - qmin
+    dq = dq < eps ? one(dq) : dq
 
-    push!(tree.s_children[s_idx], (a, sa_idx))
-    push!(tree.Nha, Na_init)
-    push!(tree.Qha, Q_init)
-    push!(tree.s_parent, s_idx)
+    return dq
+end
 
-    return sa_idx
+stack_empty(tree::GuidedTree) = iszero(tree.stack_index)
+
+function push_stack!(tree::GuidedTree, sa_idx::Integer, s_idx::Integer)
+    tree.stack_index += 1
+    tree.node_stack[tree.stack_index] = sa_idx
+    tree.stack_index += 1
+    tree.node_stack[tree.stack_index] = s_idx
+    return nothing
+end
+
+function pop_stack!(tree::GuidedTree)
+    s_idx = tree.node_stack[tree.stack_index]
+    tree.stack_index -= 1
+    sa_idx = tree.node_stack[tree.stack_index]
+    tree.stack_index -= 1
+    return sa_idx, s_idx
+end
+
+function s_children(tree::GuidedTree, s_idx::Integer)
+    Iterators.filter(
+        (ai, sa_idx)::Tuple -> !iszero(sa_idx),
+        enumerate(@view tree.s_children[:, s_idx])
+    )
+end
+
+function n_s_children(tree::GuidedTree, s_idx::Integer)
+    count(!iszero, @view tree.s_children[:, s_idx])
+end
+
+function sa_children(tree::GuidedTree, sa_idx::Integer)
+    Iterators.filter(!iszero, @view tree.sa_children[:, sa_idx])
+end
+
+function n_sa_children(tree::GuidedTree, sa_idx::Integer)
+    count(!iszero, @view tree.sa_children[:, sa_idx])
 end

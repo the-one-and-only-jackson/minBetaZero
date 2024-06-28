@@ -37,7 +37,7 @@ end
 
 # Must make sure there are more batches than can be filled with querries at once
 # n_batches = ceil(Int, 1 + n_agents / batchsize)
-function BatchManager(n_batches::Int, batchsize::Int, in_size::NTuple{N,Int}, na::Int) where N
+function BatchManager(n_batches::Int, batchsize::Int, in_size::NTuple, na::Int)
     return BatchManager(
         batchsize,
         [ACBatch(batchsize, in_size, na) for _ in 1:n_batches],
@@ -54,7 +54,7 @@ function set_querry!(bm::BatchManager, agent_idx::Int, querry)
 
     batch = batches[batch_idx]
 
-    batch.cpu_querry[:, local_idx] .= querry.value # weakref
+    batch.cpu_querry[:, local_idx] .= querry
     batch.agent_idxs[local_idx] = agent_idx
 
     n_ready = 1 + Threads.atomic_add!(batch.ready_count, 1)

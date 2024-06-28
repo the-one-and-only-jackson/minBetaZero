@@ -317,7 +317,7 @@ function select_nonroot_action(planner::GumbelPlanner, b_idx::Int)
 
     max_target = pi_completed
     for (ai, ba_idx) in b_children[b_idx]
-        max_target[ai] += Nha[ba_idx] / (1 + Nh[b_idx])
+        max_target[ai] -= Nha[ba_idx] / (1 + Nh[b_idx])
     end
 
     opt_ai = argmax(max_target)

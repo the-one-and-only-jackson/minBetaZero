@@ -16,11 +16,15 @@ end
 
 @everywhere begin
     function minBetaZero.input_representation(b::AbstractParticleBelief)
-        stack(y->convert(AbstractVector, y), particles(b))
+        s = stack(y->convert(AbstractVector, y), particles(b))
+        y = Float32.(s)
+        y .= (s .- 50) ./ 10
     end
 
     function minBetaZero.input_representation(b::AbstractVector)
-        stack(y->convert(AbstractVector, y), b)
+        s = stack(y->convert(AbstractVector, y), b)
+        y = Float32.(s)
+        y .= (s .- 50) ./ 10
     end
 
     function mean_std_layer(x)
@@ -55,20 +59,25 @@ nx = length(rand(initialstate(pomdp)))
 function testfun(pomdp)
     ret = 0.0
     s = rand(initialstate(pomdp))
-    for step_num in 1:500
+    step_num = 0
+    for outer step_num in 1:5000
         a = rand(actions(pomdp))
         r, sp = @gen(:r,:sp)(pomdp, s, a)
         ret += r * discount(pomdp) ^ (step_num-1)
         s = sp
+        if isterminal(pomdp, s)
+            break
+        end
     end
-    ret
+    return ret, step_num
 end
 
-y = [testfun(pomdp) for _ in 1:10_000]
+y = [testfun(pomdp)[2] for _ in 1:10_000]
 histogram(y)
 yst = sort(y)
 yst[50]
 yst[end-50+1]
+mean(y)
 
 
 params = minBetaZeroParameters(
@@ -78,26 +87,26 @@ params = minBetaZeroParameters(
         resample            = true, # force true, evenly weighted particles ideal for training
         cscale              = 0.1, # 1.0 trains faster but less stable
         cvisit              = 50., # not worth tuning
-        n_particles         = 100,
+        n_particles         = 200,
         m_acts_init         = 2 # number of actions sampled at root
     ),
-    t_max           = 500,
-    n_episodes      = 12, # per iteration
-    n_iter          = 334,
+    t_max           = 5000,
+    n_episodes      = 100, # per iteration
+    n_iter          = 1000,
     batchsize       = 1024,
     lr              = 1e-3,
     value_scale     = 0.5, # learning rate scaling
     lambda          = 1e-2, # weight decay
     plot_training   = false,
     train_on_planning_b = true, # this should probably not be a parameter, force true
-    n_planning_particles = 100, # match n_particles in Gumbel args
+    n_planning_particles = 200, # match n_particles in Gumbel args
     train_device    = gpu,
-    train_intensity = 8, # 4-12 seems safe?
+    train_intensity = 4, # 4-12 seems safe?
     input_dims = (nx,), # pomdp dependent input dimension
     na = na, # pomdp dependent number of actions
     use_belief_reward = false,
     use_gumbel_target = false, # policy target
-    n_net_episodes = 12, # policy-only evalutions per iteration
+    n_net_episodes = 50, # policy-only evalutions per iteration
 
     buff_cap        = 1_000_000,
     warmup_steps    = 50_000
@@ -109,11 +118,11 @@ moments_nn_params = NetworkParameters( # These are POMDP specific! not general p
     action_size         = na,
     input_size          = (nx,),
     critic_loss         = Flux.Losses.logitcrossentropy,
-    critic_categories   = collect(range(12, 22, length=64)),
+    critic_categories   = collect(range(0, 34, length=64)),
     p_dropout           = 0.1,
-    neurons             = 64,
+    neurons             = 256,
     hidden_layers       = 1,
-    shared_net          = Chain(mean_std_layer, Dense(2nx=>64), (ffres(64, gelu; p=0, k=4) for _ in 1:2)...),
+    shared_net          = Chain(mean_std_layer, Dense(2nx=>64), (ffres(64, gelu; p=0, k=4) for _ in 1:1)...),
     shared_out_size     = (64,) # must manually set... fix at a later date...
 )
 
@@ -121,11 +130,11 @@ cgf_nn_params = NetworkParameters( # These are POMDP specific! not general param
     action_size         = na,
     input_size          = (nx,),
     critic_loss         = Flux.Losses.logitcrossentropy,
-    critic_categories   = collect(range(-100, 100, length=128)),
+    critic_categories   = collect(range(0, 34, length=64)),
     p_dropout           = 0.1,
     neurons             = 256,
-    hidden_layers       = 2,
-    shared_net          = Chain(CGF(nx=>64), ffres(64, gelu; p=0, k=4)),
+    hidden_layers       = 1,
+    shared_net          = Chain(CGF(nx=>64), (ffres(64, gelu; p=0, k=4) for _ in 1:2)...),
     shared_out_size     = (64,) # must manually set... fix at a later date...
 )
 
@@ -140,18 +149,24 @@ x1 = info_moment[:steps] .- first(info_moment[:steps])
 y1 = info_moment[:returns]
 y2 = info_moment[:network_returns]
 
-plot_smoothing!(p, x1, y1; k=10, nx=500, label="Moments - Tree", c=1)
-plot_smoothing!(p, x1, y2; k=10, nx=500, label="Moments - Net", c=2)
+plot_smoothing!(p, x1, y1; k=20, nx=500, label="Moments - Tree", c=1)
+plot_smoothing!(p, x1, y2; k=20, nx=500, label="Moments - Net", c=2)
 
-plot!(ylims=(17,19), right_margin=5Plots.mm)
+plot!(ylims=(13,14.5), right_margin=5Plots.mm)
 
 savefig("examples/random_figures/attempt_4.png")
 
+# policy_loss, policy_KL, value_FVU, value_loss
+Y = reduce(vcat, map(x -> x[:value_FVU], info_cgf[:training]))
+plot_smoothing(Y; k=20, nx=500, label=false, c=1)
 
 
+ac = ActorCritic(cgf_nn_params)
+w1 = copy(ac.shared.net[1].weight)
+@time net_cgf, info_cgf = betazero(params, pomdp, ac);
+w2 = copy(net_cgf.shared.net[1].weight)
 
-
-@time net_cgf, info_cgf = betazero(params, pomdp, ActorCritic(cgf_nn_params));
+w1 .- w2
 
 x2 = info_cgf[:steps] .- first(info_cgf[:steps])
 y3 = info_cgf[:returns]
@@ -161,8 +176,7 @@ plot_smoothing!(p, x2, y3; k=5, label="CGF - Tree", c=5)
 plot_smoothing!(p, x2, y4; k=5, label="CGF - Net", c=6)
 
 xmax = maximum(series.plotattributes[:x_extrema][2] for series in p.series_list)
-ymax = maximum(series.plotattributes[:y_extrema][2] for series in p.series_list)
-plot!(ylims=(0,5*((ymax÷5)+1)), yticks=0:5:5*((ymax÷5)+1), xlims=(0,xmax), right_margin=5Plots.mm)
+plot!(p, xlims=(0,xmax), right_margin=5Plots.mm)
 
 savefig("examples/moments_cgf_4.png")
 
@@ -226,6 +240,12 @@ end
 
 r_total = sum(r_vec .* discount(pomdp) .^ (0:length(r_vec)-1))
 println("Epsidoic Return: $r_total")
+
+plot(map(x -> sum(y -> y*log(y), x.b), b_vec))
+any(map(x -> any(iszero, x.b), b_vec))
+
+y = stack(b.b for b in b_vec)
+log.(y)
 
 
 f(x) = max(0, 1+log10(x)/4)

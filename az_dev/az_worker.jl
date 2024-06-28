@@ -1,16 +1,15 @@
-struct MDPAgent{S, A, M <: MDP, RNG <: AbstractRNG}
+struct MDPAgent{M <: MDP, MCTS <: GumbelSearch, RNG <: AbstractRNG, H <: History}
     mdp     :: M
-    mcts    :: GumbelSearch{S, A, M, RNG}
+    mcts    :: MCTS
     rng     :: RNG
-    history :: History{S, Float32}
+    history :: H
 end
 
 function MDPAgent(mdp::MDP; rng::AbstractRNG = Random.default_rng(), kwargs...)
     mcts    = GumbelSearch(mdp; rng, kwargs...)
     state   = rand(rng, initialstate(mdp))
     history = History(mdp, state)
-    agent   = MDPAgent(mdp, mcts, rng, history)
-    return agent
+    return MDPAgent(mdp, mcts, rng, history)
 end
 
 function initialize_agent!(agent::MDPAgent)
@@ -64,6 +63,7 @@ function worker_main(worker::Worker; n_steps::Int = 10_000)
             querries_per_step = length(worker.agents) * (1 + worker.agents[1].mcts.tree_querries)
 
             counter = 0
+            steps = 0
 
             while !stop_flag[]
                 if !response_ready(worker.batch_manager)
@@ -76,8 +76,10 @@ function worker_main(worker::Worker; n_steps::Int = 10_000)
                 end
 
                 counter += worker.batch_manager.batchsize
+                steps += worker.batch_manager.batchsize
                 if counter >= querries_per_step
                     counter -= querries_per_step
+                    println("querries: $steps")
                     GC.gc(false)
                 end
             end

@@ -5,8 +5,14 @@ using BenchmarkTools
 
 includet("lasertag.jl")
 includet("exact_mdp.jl")
-includet("AZTrees/AZTrees.jl")
-using .LaserTag, .AZTrees
+using .LaserTag
+
+includet("AZTrees/SeqHalf.jl")
+includet("AZTrees/tree.jl")
+includet("AZTrees/GumbelMCTS.jl")
+
+# includet("AZTrees/AZTrees.jl")
+# using .AZTrees
 
 includet("ac_buffer.jl")
 includet("history.jl")
@@ -27,7 +33,8 @@ function test_main()
     )
 
     mcts_params = (; m_acts_init=2, tree_querries=10, k_o=5)
-    worker = Worker(; mdp, actor_critic, n_agents=512, batchsize=128, mcts_params...);
+    batchsize = 32
+    worker = Worker(; mdp, actor_critic, n_agents=2*batchsize, batchsize, mcts_params...);
 
     @time episode_returns, histories = worker_main(worker; n_steps=10_000) # as low as 3.2 s, 5.75 G
 
@@ -39,6 +46,10 @@ GC.enable_logging(true)
 test_main(); # 6 GB alloc, 3.5 s w/o GC
 
 GC.gc()
+
+mdp = ExactBeliefMDP(LaserTagPOMDP())
+map(T->all(x->isapprox(x,1), map(sum, eachcol(T))), values(mdp.transition_matrices))
+
 
 
 querry_ready.(worker.batch_manager.batches)

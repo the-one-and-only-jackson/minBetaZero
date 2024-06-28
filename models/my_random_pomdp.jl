@@ -12,6 +12,8 @@ struct MyRandomPOMDP{M,N,P} <: POMDP{SVector{1,Int}, Int, Int}
     T::Array{Float64, 3}
     R::Array{Float64, 2}
     O::Array{Float64, 2}
+    initial_states::Array{SVector{1,Int},1}
+    term_idx::Int
 end
 
 function MyRandomPOMDP(;
@@ -41,12 +43,29 @@ function MyRandomPOMDP(;
         O[:,i] ./= sum(O[:,i])
     end
 
-    return MyRandomPOMDP{num_states,num_actions,num_observations}(S, A, Z, T, R, O)
+    # add terminal behaviour
+    term_idx = rand(rng, 1:num_states)
+
+    for i in 1:num_actions
+        T[term_idx, :, i] .= 0
+        T[term_idx, term_idx, i] = 1
+    end
+
+    R[term_idx, :] .= 0
+
+    O[end, :] .= 0
+    O[:, term_idx] .= 0
+    O[end, term_idx] = 1
+    O ./= sum(O; dims=2)
+
+    initial_states = [SVector(i) for i in 1:num_states if i != term_idx]
+
+    return MyRandomPOMDP{num_states,num_actions,num_observations}(S, A, Z, T, R, O, initial_states, term_idx)
 end
 
 POMDPs.states(m::MyRandomPOMDP) = m.states
 POMDPs.stateindex(m::MyRandomPOMDP, s::SVector{1,Int}) = s[1]
-POMDPs.initialstate(m::MyRandomPOMDP) = Uniform(m.states)
+POMDPs.initialstate(m::MyRandomPOMDP) = UnsafeUniform(m.initial_states)
 POMDPs.actions(m::MyRandomPOMDP) = m.actions
 POMDPs.actionindex(m::MyRandomPOMDP, a) = a
 POMDPs.observations(m::MyRandomPOMDP) = m.observations
@@ -55,51 +74,6 @@ POMDPs.discount(m::MyRandomPOMDP) = 0.97
 POMDPs.reward(m::MyRandomPOMDP, s, a) = m.R[s[1], a]
 POMDPs.transition(m::MyRandomPOMDP, s, a) = SparseCat(m.states, @view m.T[s[1], :, a])
 POMDPs.observation(m::MyRandomPOMDP, a, sp) = SparseCat(m.observations, @view m.O[:, sp[1]])
-
+POMDPs.isterminal(m::MyRandomPOMDP, s) = stateindex(m,s) == m.term_idx
 
 end
-
-
-#=
-Code to make things work and check
-
-include("./models/my_random_pomdp.jl")
-using .RandomPOMDP
-using POMDPs
-using StaticArrays
-
-d = MyRandomPOMDP()
-s = SVector(11)
-transition(d,s,3)
-observation(d,:right,s)
-b = initialstate(d)
-reward(d,s,2)
-
-using QMDP
-solver = QMDPSolver(max_iterations=2000,belres=1e-3,verbose=true)
-policy = solve(solver, d);
-a = action(policy,b)
-
-using SARSOP
-solver = SARSOPSolver()
-policy = solve(solver, d);
-a = action(policy,b)
-
-import POMDPTools:RolloutSimulator
-using ProgressMeter
-using Random
-using Statistics
-sim_rng = MersenneTwister(21)
-n_episodes = 100
-max_steps = 100
-returns = Vector{Union{Float64,Missing}}(missing, n_episodes);
-up = updater(policy);
-# up = BootstrapFilter(d, 100, MersenneTwister(abs(rand(Int8))));
-@showprogress for i in 1:n_episodes
-    ro = RolloutSimulator(max_steps=max_steps, rng=sim_rng)
-    returns[i] = simulate(ro, d, policy, up)
-end
-mean(returns)
-std(returns)/sqrt(n_episodes)
-
-=#
