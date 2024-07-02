@@ -1,3 +1,11 @@
+module BeliefMDPs
+
+using POMDPs, POMDPTools
+using Statistics, StatsBase, Distributions, Random
+using SparseArrays
+
+export ExactBeliefMDP
+
 struct ExactBeliefMDP{S, A, P, V, T} <: MDP{S,A}
     pomdp::P
     ordered_states::V
@@ -33,31 +41,31 @@ POMDPs.discount(m::ExactBeliefMDP) = discount(m.pomdp)
 POMDPs.initialstate(m::ExactBeliefMDP) = Deterministic(m.b0)
 
 function POMDPs.gen(m::ExactBeliefMDP{B,A}, b::B, a::A, rng::AbstractRNG) where {B, A}
-    pomdp = m.pomdp
-    state_space = m.ordered_states
+    (; pomdp, ordered_states) = m
 
     T = m.transition_matrices[a]
-    Trows = rowvals(T)
-    Tvals = nonzeros(T)
 
-    o = sample_obs(rng, pomdp, b, a, state_space, T)
+    o = sample_obs(rng, pomdp, b, a, ordered_states, T)
 
-    bp = similar(b)
-    fill!(bp, 0)
+    state_itr = Iterators.filter(
+        (_, _, p_s)::Tuple -> !iszero(p_s),
+        zip(enumerate(ordered_states)..., b)
+    )
 
+    function transition_itr(si)
+        sparse_indicies = nzrange(T, si)
+        spi     = @view rowvals(T)[sparse_indicies]
+        sp      = @view ordered_states[spi]
+        p_sp_s  = @view nonzeros(T)[sparse_indicies] # p(sp | s, a)
+        return zip(spi, sp, p_sp_s)
+    end
+
+    bp = fill!(similar(b), 0)
     r  = 0.0
 
-    for (si, (s, b_s)) in enumerate(zip(state_space, b))
-        iszero(b_s) && continue
-        for i in nzrange(T, si)
-            spi = Trows[i]
-            sp = state_space[spi]
-            op = obs_weight(pomdp, s, a, sp, o)
-
-            tp = Tvals[i]
-            bp[spi] += op * tp * b_s
-            r += tp * b_s * reward(pomdp, s, a, sp)
-        end
+    for (si, s, p_s) in state_itr, (spi, sp, p_sp_s) in transition_itr(si)
+        bp[spi] += p_sp_s * p_s * obs_weight(pomdp, s, a, sp, o)
+        r       += p_sp_s * p_s * reward(pomdp, s, a, sp, o)
     end
 
     bp ./= sum(bp)
@@ -66,39 +74,32 @@ function POMDPs.gen(m::ExactBeliefMDP{B,A}, b::B, a::A, rng::AbstractRNG) where 
 end
 
 function sample_obs(rng, pomdp, b, a, state_space, T)
-    si = sampleindex(rng, b)
-
-    Trows = rowvals(T)
-    Tvals = nonzeros(T)
-    idxs  = nzrange(T, si)
-
-    spi = sampleindex(rng, Tvals, first(idxs), last(idxs))
-    sp  = state_space[Trows[spi]]
-
+    si   = sampleindex(rng, b)
+    spi  = sampleindex(rng, nonzeros(T), nzrange(T, si))
+    sp   = state_space[rowvals(T)[spi]]
     return rand(rng, observation(pomdp, a, sp))
 end
 
-sampleindex(rng, b) = sampleindex(rng, b, 1, length(b))
-function sampleindex(rng::AbstractRNG, b::AbstractVector{T}, first::Int, last::Int) where T
-    @assert first <= last "first $first > last $last"
-    first == last && return first
+function sampleindex(rng::AbstractRNG, b::AbstractVector{T}, indicies = eachindex(b)) where T
+    @assert length(indicies) > 0
 
-    sb = sum(@view b[first:last])
-    @assert sb > 0 "$sb, $first, $last"
-    u = rand(rng, T) * sb
-    for i in first:last
+    u = rand(rng, T) * sum(@view b[indicies]) # bounds check done here
+
+    @assert u > 0 "indicies = $indicies, b = $b"
+
+    for i in indicies
         @inbounds u -= b[i]
         u <= 0 && return i
     end
-    return last
+
+    return last(indicies)
 end
 
 
 function POMDPs.isterminal(m::ExactBeliefMDP{B}, b::B) where B
-    for (s, p) in zip(m.ordered_states, b)
-        if p > eps() && !isterminal(m.pomdp, s)
-            return false
-        end
+    all(zip(b, m.ordered_states)) do (p, s)::Tuple
+        p < eps(eltype(B)) || isterminal(m.pomdp, s)
     end
-    return true
+end
+
 end

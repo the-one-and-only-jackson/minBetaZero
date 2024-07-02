@@ -1,7 +1,7 @@
 struct GumbelSearch{Tree, A, M, RNG}
     mdp             :: M
     tree            :: Tree
-    tree_querries   :: Int
+    tree_queries   :: Int
     ordered_actions :: Vector{A}
     m_acts_init     :: Int
     live_actions    :: Vector{Bool}
@@ -14,7 +14,7 @@ struct GumbelSearch{Tree, A, M, RNG}
     policy_scratch  :: Vector{Float32}
 
     function GumbelSearch(mdp :: M;
-            tree_querries :: Real = length(actions(mdp)),
+            tree_queries :: Real = length(actions(mdp)),
             m_acts_init   :: Real = length(actions(mdp)),
             k_o           :: Real = 1,
             alpha_o       :: Real = 0,
@@ -25,25 +25,25 @@ struct GumbelSearch{Tree, A, M, RNG}
 
         na = length(actions(mdp))
 
-        tree_querries   = floor(Int, tree_querries) # root querry addition
+        tree_queries   = floor(Int, tree_queries) # root querry addition
         ordered_actions = POMDPTools.ordered_actions(mdp)
         m_acts_init     = floor(Int, m_acts_init)
         live_actions    = [false for _ in 1:na]
-        target_N        = SeqHalf(; n=tree_querries, m=m_acts_init)
+        target_N        = SeqHalf(; n=tree_queries, m=m_acts_init)
 
         k_o     = Float64(k_o)
         alpha_o = Float64(alpha_o)
         cscale  = Float64(cscale)
         cvisit  = Float64(cvisit)
 
-        tree = GuidedTree{S, Int32, Float32}(tree_querries + 1, na, ceil(Int, k_o))
+        tree = GuidedTree{S, Int32, Float32}(tree_queries + 1, na, ceil(Int, k_o))
 
         policy_scratch = zeros(Float32, na)
 
         return new{GuidedTree{S, Int32, Float32}, A, M, RNG}(
             mdp,
             tree,
-            tree_querries,
+            tree_queries,
             ordered_actions,
             m_acts_init,
             live_actions,
@@ -59,9 +59,28 @@ struct GumbelSearch{Tree, A, M, RNG}
 end
 
 function root_info(planner::GumbelSearch)
-    a = select_best_action(planner)
-    policy_target, v_mix = get_improved_policy(planner, 1)
-    return a, (; planner.tree, policy_target = copy(policy_target), value_target = v_mix)
+    a, ai = select_best_action(planner)
+    vp = next_value(planner, 1, ai)
+
+    policy_target, value_target = get_improved_policy(planner, 1)
+    policy_target = copy(policy_target)
+
+    return a, (; planner.tree, policy_target, value_target, next_value = vp)
+end
+
+function next_value(planner, s_idx, ai)
+    (; mdp, tree) = planner
+    (; reward, Nh, Nha, Qha) = tree
+
+    sa_idx = tree.s_children[ai, s_idx]
+
+    r  = sum(index -> reward[index] * (1 + Nh[index]), sa_children(tree, sa_idx))
+    r /= Nha[sa_idx]
+
+    gamma = convert(eltype(Qha), discount(mdp))
+    value = (Qha[sa_idx] - r) / gamma
+
+    return value
 end
 
 function live_root_actions(planner::GumbelSearch)
@@ -84,10 +103,10 @@ function select_best_action(planner::GumbelSearch)
 
     a = ordered_actions[ai_opt]
 
-    return a
+    return a, ai_opt
 end
 
-Base.isdone(planner::GumbelSearch) = planner.tree.Nh[1] >= planner.tree_querries
+Base.isdone(planner::GumbelSearch) = planner.tree.Nh[1] >= planner.tree_queries
 
 function insert_root!(planner::GumbelSearch, s_root)
     (; tree, mdp, target_N) = planner

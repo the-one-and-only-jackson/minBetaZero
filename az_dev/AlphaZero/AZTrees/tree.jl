@@ -150,6 +150,9 @@ function push_stack!(tree::GuidedTree, sa_idx::Integer, s_idx::Integer)
 end
 
 function pop_stack!(tree::GuidedTree)
+    if tree.stack_index < 2
+        dump(tree)
+    end
     s_idx = tree.node_stack[tree.stack_index]
     tree.stack_index -= 1
     sa_idx = tree.node_stack[tree.stack_index]
