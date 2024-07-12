@@ -49,7 +49,7 @@ function POMDPs.gen(m::ExactBeliefMDP{B,A}, b::B, a::A, rng::AbstractRNG) where 
 
     state_itr = Iterators.filter(
         (_, _, p_s)::Tuple -> !iszero(p_s),
-        zip(enumerate(ordered_states)..., b)
+        zip(eachindex(ordered_states), ordered_states, b)
     )
 
     function transition_itr(si)
@@ -83,16 +83,22 @@ end
 function sampleindex(rng::AbstractRNG, b::AbstractVector{T}, indicies = eachindex(b)) where T
     @assert length(indicies) > 0
 
-    u = rand(rng, T) * sum(@view b[indicies]) # bounds check done here
+    b_sum = sum(@view b[indicies])
+    @assert b_sum > 0 "indicies = $indicies, b = $b"
 
-    @assert u > 0 "indicies = $indicies, b = $b"
+    u = rand(rng, T) * b_sum
+
+    j = first(indicies)
 
     for i in indicies
+        iszero(b[i]) && continue
+
+        j = i
         @inbounds u -= b[i]
-        u <= 0 && return i
+        u <= 0 && break
     end
 
-    return last(indicies)
+    return j
 end
 
 
