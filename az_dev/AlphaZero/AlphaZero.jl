@@ -42,7 +42,7 @@ export alphazero, AlphaZeroParams
     plot_training       = false
     train_intensity     = 8
     warmup_steps        = 50_000
-    optimiser = Flux.Optimisers.OptimiserChain(
+    optimiser           = Flux.Optimisers.OptimiserChain(
         Flux.Optimisers.ClipNorm(1),
         Flux.Optimisers.ClipGrad(1),
         Flux.Optimisers.AdamW(; eta = lr, lambda = lambda * lr)
@@ -57,37 +57,40 @@ include("ACBatch.jl")
 include("MDPWorker.jl")
 
 function alphazero(params::AlphaZeroParams, mdp::MDP, actor_critic, info = Dict{Symbol, Any}())
-    (; n_iter, steps_per_iter, buff_cap, train_intensity, warmup_steps, batchsize) = params
-
     @assert Threads.nthreads() > 1 "Start Julia with multiple threads to use AlphaZero"
 
-    buffer          = DataBuffer(mdp, buff_cap, batchsize, params.rng)
+    buffer          = DataBuffer(mdp, params.buff_cap, params.batchsize, params.rng)
     history_channel = Channel{MDPHistory{statetype(mdp), Float32}}(Inf)
-    worker          = MDPWorker(params, mdp, deepcopy(actor_critic), history_channel)
+    worker          = MDPWorker(mdp, deepcopy(actor_critic), history_channel, params)
     actor_critic    = gpu(actor_critic)
     optimiser       = Flux.setup(params.optimiser, actor_critic)
 
     info[:ac] = actor_critic
 
-    _steps_saved = 0
-    prog = Progress(n_iter + 1)
+    az_main(params, actor_critic, info, buffer, history_channel, worker, optimiser)
+end
 
-    for itr in 1:(n_iter + 1)
+function az_main(params, actor_critic, info, buffer, history_channel, worker, optimiser)
+    (; n_iter, steps_per_iter, train_intensity, warmup_steps, batchsize) = params
+
+    steps_saved = 0
+    prog = Progress(n_iter)
+
+    for itr in 1:n_iter
         worker_main(worker, steps_per_iter)
         process_histories!(history_channel, buffer, info, itr, params)
-
-        if buffer.length >= warmup_steps && itr <= n_iter
-            _steps_saved += steps_per_iter * train_intensity
-            n_batches = _steps_saved ÷ batchsize
-            _steps_saved -= n_batches * batchsize
-
-            if n_batches > 0
-                train!(actor_critic, optimiser, buffer, params, n_batches, info)
-                update_actor_critic!(worker, actor_critic)
-            end
-        end
-
         next!(prog; showvalues = progressmeter_info(info, itr, params))
+
+        buffer.length >= warmup_steps || continue
+
+        steps_saved += steps_per_iter * train_intensity
+        n_batches = steps_saved ÷ batchsize
+        steps_saved -= n_batches * batchsize
+
+        if n_batches > 0
+            train!(actor_critic, optimiser, buffer, params, n_batches, info)
+            update_actor_critic!(worker, actor_critic)
+        end
     end
 
     finish!(prog)

@@ -7,40 +7,22 @@ struct MDPWorker{AC, A <: MDPAgent, B <: BatchManager, H <: Union{<:Channel, <:R
     history_channel :: H
 end
 
-function MDPWorker(params::AlphaZeroParams, mdp::MDP, actor_critic, history_channel)
-    (; max_steps, segment_length, inference_batchsize, tree_queries, k_o, cscale,
-    cvisit, m_acts_init, rng, n_agents, inference_T) = params
+function MDPWorker(mdp::MDP, actor_critic, history_channel::Channel, params::AlphaZeroParams)
+    (; inference_batchsize, n_agents, inference_T) = params
 
-    worker_args = (; inference_batchsize, n_agents, inference_T, history_channel)
-    agent_args  = (; max_steps, segment_length, rng)
-    mcts_args   = (; tree_queries, m_acts_init, k_o, cscale, cvisit)
+    @assert n_agents >= inference_batchsize
 
-    MDPWorker(; actor_critic, mdp, worker_args..., agent_args..., mcts_args...)
-end
-
-function MDPWorker(;
-    actor_critic,
-    mdp                 :: MDP,
-    history_channel     :: Channel,
-    inference_batchsize :: Integer = 32,
-    n_agents            :: Integer = 2 * actor_critic,
-    inference_T         :: Union{Type{Float32}, Type{Float16}} = Float32,
-    agentargs...
-    )
-
-    batchsize = inference_batchsize # used to match az params name
-
-    @assert n_agents >= batchsize
-
-    agents = [MDPAgent(mdp; agentargs...) for _ in 1:n_agents]
+    agents = [MDPAgent(mdp, params) for _ in 1:n_agents]
 
     step_counter   = Threads.Atomic{Int}(0)
     steps_since_gc = Threads.Atomic{Int}(0)
 
-    in_size       = size(rand(MersenneTwister(1), initialstate(mdp)))
-    na            = length(actions(mdp))
-    n_batches     = ceil(Int, n_agents // batchsize)
-    batch_manager = BatchManager{inference_T}(; batchsize, in_size, na, n_batches)
+    batch_manager = BatchManager{inference_T}(;
+        batchsize = inference_batchsize,
+        in_size = size(rand(MersenneTwister(1), initialstate(mdp))),
+        na = length(actions(mdp)),
+        n_batches = ceil(Int, n_agents // inference_batchsize)
+    )
 
     # initialize all the agents
     for (agent_idx, agent) in enumerate(agents)
@@ -113,7 +95,7 @@ end
 function process_agent(worker::MDPWorker, batch::ACBatch, index::Integer)
     (; agents, history_channel, step_counter, steps_since_gc, batch_manager) = worker
 
-    agent_idx, value, policy = get_response!(batch, index)
+    agent_idx, value, policy = get_response(batch, index)
     agent = agents[agent_idx]
     mcts  = agent.mcts
 

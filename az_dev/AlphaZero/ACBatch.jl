@@ -21,22 +21,24 @@ struct ACBatch{T, Q_CPU <: Array, Q_GPU <: CuArray}
     end
 end
 
-function set_querry!(batch::ACBatch, batchindex::Integer, agent_idx::Integer, querry)
+function set_querry!(batch::ACBatch, batchindex::Integer, agent_idx::Integer, query)
     (; cpu_querry, agent_idxs, ready_count) = batch
-    cpu_querry[:, batchindex] .= querry
+    cpu_querry[:, batchindex] .= query
     agent_idxs[batchindex] = agent_idx
     n_ready = 1 + Threads.atomic_add!(ready_count, 1)
     return n_ready
 end
 
-function get_response!(batch::ACBatch, batchindex::Integer)
-    agent_idx = batch.agent_idxs[batchindex]
-    value     = batch.value[batchindex]
-    policy    = @view batch.policy[:, batchindex]
-    return agent_idx, value, policy
+function get_response(batch::ACBatch, index::Integer)
+    agent_index = batch.agent_idxs[index]
+    value       = batch.value[index]
+    policy      = @view batch.policy[:, index]
+    return agent_index, value, policy
 end
 
 function process_batch!(batch::ACBatch, ac)
+    @assert all(isfinite, batch.gpu_querry) "$batch.gpu_querry"
+
     (; policy, value) = ac(batch.gpu_querry; logits=true)
 
     @assert all(isfinite, value)
@@ -75,15 +77,21 @@ Base.eltype(::BatchManager{T, B}) where {T, B} = B
 Base.isready(bm::BatchManager) = isready(bm.gpu_jobs)
 Base.take!(bm::BatchManager) = take!(bm.gpu_jobs)
 
-function set_querry!(bm::BatchManager, agent_idx::Integer, s_querry)
-    (; gpu_jobs, avail_querries) = bm
-    batch, batchindex = take!(avail_querries)
-    n_ready = set_querry!(batch, batchindex, agent_idx, s_querry)
+function set_querry!(bm::BatchManager, agentindex::Integer, query)
+    batch, batchindex = take!(bm.avail_querries)
+    n_ready = set_querry!(batch, batchindex, agentindex, query)
+
     if n_ready == batch.batchsize
-        copyto!(batch.gpu_querry, batch.cpu_querry)
-        CUDA.synchronize()
-        put!(gpu_jobs, batch)
+        queue_batch!(bm, batch)
     end
+
+    return nothing
+end
+
+function queue_batch!(bm::BatchManager, batch::ACBatch)
+    copyto!(batch.gpu_querry, batch.cpu_querry)
+    CUDA.synchronize()
+    put!(bm.gpu_jobs, batch)
     return nothing
 end
 

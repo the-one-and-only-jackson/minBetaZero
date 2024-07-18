@@ -2,7 +2,7 @@ module BeliefMDPs
 
 using POMDPs, POMDPTools
 using Statistics, StatsBase, Distributions, Random
-using SparseArrays
+using StaticArrays, SparseArrays
 
 export ExactBeliefMDP
 
@@ -11,22 +11,29 @@ struct ExactBeliefMDP{S, A, P, V, T} <: MDP{S,A}
     ordered_states::V
     b0::S
     transition_matrices::Dict{A, T}
+
     function ExactBeliefMDP(pomdp::P) where {S, A, O, P <: POMDP{S,A,O}}
         os = ordered_states(pomdp)
 
-        b0 = zeros(Float32, length(os))
+        etype = Float32
+
+        b0 = if length(os) <= 100
+            @MVector zeros(etype, length(os))
+        else
+            zeros(etype, length(os))
+        end
+
         for (s, p) in weighted_iterator(initialstate(pomdp))
             sidx = stateindex(pomdp, s)
             b0[sidx] = p
         end
 
         T = transition_matrices(pomdp; sparse=true)
-        TT = valtype(T)
-        for (k,v) in T
+        for (k, v) in T
             T[k] = copy(v') # make each col correspond to the state index
         end
 
-        new{Vector{Float32}, A, P, Vector{S}, TT}(pomdp, os, b0, T)
+        new{typeof(b0), A, P, Vector{S}, valtype(T)}(pomdp, os, b0, T)
     end
 end
 
@@ -84,21 +91,18 @@ function sampleindex(rng::AbstractRNG, b::AbstractVector{T}, indicies = eachinde
     @assert length(indicies) > 0
 
     b_sum = sum(@view b[indicies])
-    @assert b_sum > 0 "indicies = $indicies, b = $b"
+
+    @assert b_sum > eps(T) "indicies = $indicies, b = $b"
 
     u = rand(rng, T) * b_sum
+    i = 0
 
-    j = first(indicies)
-
-    for i in indicies
-        iszero(b[i]) && continue
-
-        j = i
+    for outer i in Iterators.filter(i -> b[i] > eps(T), indicies)
         @inbounds u -= b[i]
         u <= 0 && break
     end
 
-    return j
+    return i
 end
 
 
